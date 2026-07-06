@@ -256,6 +256,11 @@ for (const tid of reservedTestIds) {
 if (errors.length > 0) {
   console.error(`Traceability check failed (${errors.length} error${errors.length === 1 ? '' : 's'}):\n`);
   for (const e of errors) console.error(`  ✗ ${e}`);
+  if (process.env.GITHUB_ACTIONS) {
+    // Workflow commands render as annotations in the run summary UI, so the
+    // failure reason is visible without opening the raw log.
+    for (const e of errors) console.log(`::error title=Traceability::${e}`);
+  }
   process.exit(1);
 }
 const realized = [...mappedTestIds].length;

@@ -57,6 +57,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Translate rustc/clippy diagnostics into GitHub annotations so a failed
+      # run shows the actual error in the summary UI instead of a blank
+      # "Error:" — matcher pairs the message line with its `--> file:line:col`.
+      - name: Enable Rust problem matcher
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
       # tauri's generate_context! macro requires the frontendDist directory to
       # exist at compile time; the Rust job must not depend on the Frontend job
       # for that (they run in parallel), so give it an empty placeholder.
