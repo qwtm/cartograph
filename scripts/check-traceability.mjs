@@ -244,8 +244,18 @@ for (const line of mapSrc.split('\n')) {
     }
   }
   // Secondary realizations noted as story:X/Y or manual:MT-... are validated too.
-  for (const m of note.matchAll(/\b(story|manual):([\w/ -]+?)(?=[,)]|\s+and\b|$)/gu)) {
+  const secondaryRefs = [...note.matchAll(/\b(story|manual):([\w/ -]+?)(?=[,)]|\s+and\b|$)/gu)];
+  for (const m of secondaryRefs) {
     checkRef(tid, m[1], m[2].trim());
+  }
+  // A ref the pattern cannot terminate would otherwise be silently skipped —
+  // a claimed realization the gate never checks. Reject it instead.
+  const declared = [...note.matchAll(/\b(?:story|manual):/gu)].length;
+  if (declared > secondaryRefs.length) {
+    fail(
+      `${tid} note has a story:/manual: reference the gate cannot parse — ` +
+        'end it with ",", ")", " and", or end-of-line',
+    );
   }
 }
 for (const tid of reservedTestIds) {
