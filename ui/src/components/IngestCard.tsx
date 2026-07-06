@@ -28,7 +28,7 @@ export function IngestCard({ busy, summary, error, canIngest, onIngest }: Ingest
         <input
           type="text"
           value={path}
-          placeholder="/path/to/a/repo or https://github.com/owner/name"
+          placeholder="/path, github URL, or cartograph.system.toml"
           aria-label="Directory to ingest"
           onChange={(e) => setPath(e.target.value)}
           disabled={!canIngest || busy}
@@ -40,6 +40,11 @@ export function IngestCard({ busy, summary, error, canIngest, onIngest }: Ingest
       {error && <p className="error-text">{error}</p>}
       {summary && !busy && (
         <p className="muted">
+          {summary.repos && summary.repos.length > 0 && (
+            <>
+              <code data-testid="system-repos">{summary.repos.join(', ')}</code> —{' '}
+            </>
+          )}
           {summary.repo && summary.commit_sha && (
             <>
               <code data-testid="cloned-repo">

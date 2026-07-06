@@ -1699,8 +1699,10 @@ name = "ingest"
 version = "0.0.1"
 dependencies = [
  "git2",
+ "serde",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

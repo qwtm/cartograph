@@ -119,3 +119,45 @@ fn repo_urls_parse_to_identities() {
         assert!(parse_repo_url(bad).is_err(), "{bad}");
     }
 }
+
+// AC-0002: the topology manifest parses repos, layer hints, and known
+// identities; unknown layers fail loudly. (T-0002)
+#[test]
+fn manifest_parses_repos_layers_and_env() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(manifest::MANIFEST_NAME),
+        r#"
+[[repos]]
+url = "acme/shop"
+layers = ["server", "client"]
+
+[[repos]]
+url = "./infra"
+layers = ["infra"]
+
+[env]
+ORDERS_QUEUE = "https://sqs.example/orders"
+"#,
+    )
+    .unwrap();
+    // Loading by directory finds the canonical file name.
+    let m = manifest::SystemManifest::load(dir.path()).unwrap();
+    assert_eq!(m.repos.len(), 2);
+    assert_eq!(m.repos[0].url, "acme/shop");
+    assert_eq!(m.repos[0].layers, ["server", "client"]);
+    assert_eq!(m.repos[1].layers, ["infra"]);
+    assert_eq!(
+        m.env.get("ORDERS_QUEUE").map(String::as_str),
+        Some("https://sqs.example/orders")
+    );
+}
+
+#[test]
+fn manifest_rejects_unknown_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join(manifest::MANIFEST_NAME);
+    std::fs::write(&f, "[[repos]]\nurl = \"a/b\"\nlayers = [\"backend\"]\n").unwrap();
+    let err = manifest::SystemManifest::load(&f).unwrap_err();
+    assert!(err.to_string().contains("unknown layer \"backend\""));
+}

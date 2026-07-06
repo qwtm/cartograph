@@ -92,6 +92,16 @@ impl ConfigIndex {
     pub fn resolve(&self, key: &str) -> Option<(&str, &str)> {
         self.env.get(key).map(|(v, f)| (v.as_str(), f.as_str()))
     }
+
+    /// Apply author-declared identities from the topology manifest
+    /// (US-0001 AC-0002). Manifest entries *override* env files — the
+    /// author's declaration is the most confirmed knowledge we have.
+    pub fn apply_manifest(&mut self, env: &BTreeMap<String, String>, source: &str) {
+        for (key, value) in env {
+            self.env
+                .insert(key.clone(), (value.clone(), source.to_string()));
+        }
+    }
 }
 
 fn collect_env_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {

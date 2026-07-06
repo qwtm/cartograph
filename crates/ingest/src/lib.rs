@@ -8,6 +8,8 @@
 //! success — an auth failure leaves **no partial clone** (AC-0003) and
 //! maps to a typed error carrying remediation text.
 
+pub mod manifest;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
