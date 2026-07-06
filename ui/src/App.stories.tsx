@@ -96,6 +96,14 @@ function installFakeCore() {
         return 'flowchart LR\n    res_aws_sqs_queue_orders["aws_sqs_queue.orders"]\n';
       case 'ingest_path':
         return { job_id: 1, files: 2, nodes: 12, edges: 18 };
+      case 'add_system':
+        return {
+          job_id: 3,
+          repos: ['acme/shop@a1b2c3d4e5f6', 'local/infra@workdir'],
+          files: 5,
+          nodes: 40,
+          edges: 60,
+        };
       case 'add_repo':
         return {
           job_id: 2,

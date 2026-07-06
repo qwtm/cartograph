@@ -48,6 +48,8 @@ export interface IngestSummary {
   /** Set for GitHub adds: the cloned repo listed with its SHA (AC-0001). */
   repo?: string;
   commit_sha?: string;
+  /** Set for system-manifest adds: `identity@sha12` per repo (AC-0002). */
+  repos?: string[];
 }
 
 /** One traced flow as returned by `list_flows` (flowtracer::Flow). */
@@ -166,14 +168,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ingest: async (path: string) => {
     // Clear prior outcome up front so a failed run never shows a stale summary.
     set({ ingestBusy: true, ingestError: null, ingestSummary: null });
-    // A GitHub reference clones with real identity (US-0001); anything else
+    // A GitHub reference clones with real identity (US-0001); a topology
+    // manifest ingests the whole declared system (AC-0002); anything else
     // ingests as a local tree.
-    const isRepoUrl = /^(https:\/\/github\.com\/|git@github\.com:)/.test(path.trim());
+    const trimmed = path.trim();
+    const isRepoUrl = /^(https:\/\/github\.com\/|git@github\.com:)/.test(trimmed);
+    const isManifest = trimmed.endsWith('cartograph.system.toml');
+    const command = isManifest ? 'add_system' : isRepoUrl ? 'add_repo' : 'ingest_path';
     try {
       const summary = await invokeOr<IngestSummary | null>(
-        isRepoUrl ? 'add_repo' : 'ingest_path',
+        command,
         null,
-        isRepoUrl ? { url: path.trim() } : { path },
+        isRepoUrl ? { url: trimmed } : { path: trimmed },
       );
       set({ ingestSummary: summary });
     } catch (e) {

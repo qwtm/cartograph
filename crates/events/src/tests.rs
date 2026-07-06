@@ -391,3 +391,26 @@ fn env_resolved_fetch_url_confirms() {
     assert_eq!(edge.props["resolver"], "config:.env");
     assert_eq!(confidence(&edge.props), "Confirmed");
 }
+
+// AC-0002: manifest-declared identities override env files and resolve
+// with the manifest as the named source. (T-0002)
+#[test]
+fn manifest_identities_override_env_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "ORDERS_TOPIC=from-dotenv\n").unwrap();
+    let mut cfg = ConfigIndex::from_dir(dir.path()).unwrap();
+    let mut manifest = std::collections::BTreeMap::new();
+    manifest.insert("ORDERS_TOPIC".to_string(), "from-manifest".to_string());
+    manifest.insert("EXTRA_QUEUE".to_string(), "q".to_string());
+    cfg.apply_manifest(&manifest, "cartograph.system.toml");
+
+    assert_eq!(
+        cfg.resolve("ORDERS_TOPIC"),
+        Some(("from-manifest", "cartograph.system.toml")),
+        "author declaration beats checked-in env files"
+    );
+    assert_eq!(
+        cfg.resolve("EXTRA_QUEUE"),
+        Some(("q", "cartograph.system.toml"))
+    );
+}

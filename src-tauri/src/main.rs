@@ -77,14 +77,27 @@ fn extract_tree(
     root: &std::path::Path,
     repo: &str,
     commit: &str,
+    layers: &[String],
+    manifest_env: &std::collections::BTreeMap<String, String>,
 ) -> Result<adapters_lang_ts::Extraction, String> {
+    // Layer hints gate extractors (AC-0002): empty means everything; the
+    // TS pass covers server/events/client, the HCL pass infra/cloud.
+    let wants =
+        |names: &[&str]| layers.is_empty() || names.iter().any(|n| layers.iter().any(|l| l == n));
     let ts_id = adapters_lang_ts::SourceId { repo, commit };
-    let mut extraction = adapters_lang_ts::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
-    let tf_id = iac::SourceId { repo, commit };
-    let tf = iac::extract_dir(root, &tf_id).map_err(|e| e.to_string())?;
-    extraction.nodes.extend(tf.nodes);
-    extraction.edges.extend(tf.edges);
-    let cfg = events::ConfigIndex::from_dir(root).map_err(|e| e.to_string())?;
+    let mut extraction = if wants(&["server", "events", "client"]) {
+        adapters_lang_ts::extract_dir(root, &ts_id).map_err(|e| e.to_string())?
+    } else {
+        adapters_lang_ts::Extraction::default()
+    };
+    if wants(&["infra", "cloud"]) {
+        let tf_id = iac::SourceId { repo, commit };
+        let tf = iac::extract_dir(root, &tf_id).map_err(|e| e.to_string())?;
+        extraction.nodes.extend(tf.nodes);
+        extraction.edges.extend(tf.edges);
+    }
+    let mut cfg = events::ConfigIndex::from_dir(root).map_err(|e| e.to_string())?;
+    cfg.apply_manifest(manifest_env, ingest::manifest::MANIFEST_NAME);
     let ev_id = events::SourceId { repo, commit };
     let stitched = events::stitch(&extraction.event_sites, &cfg, &ev_id);
     extraction.nodes.extend(stitched.nodes);
@@ -168,7 +181,14 @@ fn ingest_path(path: String, state: State<'_, AppState>) -> Result<IngestSummary
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     );
-    let extraction = extract_tree(&root, &repo, "workdir").map_err(|e| fail(e, &state, job_id))?;
+    let extraction = extract_tree(
+        &root,
+        &repo,
+        "workdir",
+        &[],
+        &std::collections::BTreeMap::new(),
+    )
+    .map_err(|e| fail(e, &state, job_id))?;
     let files = extraction
         .nodes
         .iter()
@@ -236,8 +256,14 @@ fn add_repo(
     let token = ingest::discover_token();
     let cloned = ingest::clone_repo(&url, &repos_dir, token.as_deref())
         .map_err(|e| fail(e.to_string(), &state, job_id))?;
-    let extraction = extract_tree(&cloned.path, &cloned.repo, &cloned.commit_sha)
-        .map_err(|e| fail(e, &state, job_id))?;
+    let extraction = extract_tree(
+        &cloned.path,
+        &cloned.repo,
+        &cloned.commit_sha,
+        &[],
+        &std::collections::BTreeMap::new(),
+    )
+    .map_err(|e| fail(e, &state, job_id))?;
     let files = extraction
         .nodes
         .iter()
@@ -266,6 +292,106 @@ fn add_repo(
         files,
         nodes: extraction.nodes.len() as u64,
         edges: extraction.edges.len() as u64,
+    })
+}
+
+#[derive(Serialize)]
+struct AddSystemSummary {
+    job_id: i64,
+    /// `identity@sha12` per ingested repo, in manifest order.
+    repos: Vec<String>,
+    files: u64,
+    nodes: u64,
+    edges: u64,
+}
+
+/// Ingest a whole system from `cartograph.system.toml` (US-0001 AC-0002):
+/// clone/read every declared repo, apply its layer hints and the
+/// manifest's known channel identities at ingest.
+#[tauri::command]
+fn add_system(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AddSystemSummary, String> {
+    let job_id = {
+        let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let job = jobs
+            .enqueue(&format!("add-system:{path}"))
+            .map_err(|e| e.to_string())?;
+        jobs.set_status(job.id, "running")
+            .map_err(|e| e.to_string())?;
+        job.id
+    };
+    let fail = |e: String, state: &State<'_, AppState>, job_id: i64| -> String {
+        if let Ok(mut jobs) = state.jobs.lock() {
+            let _ = jobs.set_status(job_id, "failed");
+        }
+        e
+    };
+
+    let manifest_path =
+        std::fs::canonicalize(&path).map_err(|e| fail(e.to_string(), &state, job_id))?;
+    let manifest = ingest::manifest::SystemManifest::load(&manifest_path)
+        .map_err(|e| fail(e.to_string(), &state, job_id))?;
+    let base = manifest_path.parent().unwrap_or(std::path::Path::new("."));
+    let repos_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| fail(e.to_string(), &state, job_id))?
+        .join("repos");
+    let token = ingest::discover_token();
+
+    let mut repos = Vec::new();
+    let (mut files, mut nodes, mut edges) = (0u64, 0u64, 0u64);
+    for entry in &manifest.repos {
+        // GitHub-ish references clone; anything else is a path relative to
+        // the manifest (local repos in one checkout, the dogfood case).
+        let is_remote = entry.url.starts_with("https://")
+            || entry.url.starts_with("git@")
+            || entry.url.starts_with("file://")
+            || (entry.url.split('/').count() == 2 && !std::path::Path::new(&entry.url).exists());
+        let (root, repo, commit) = if is_remote {
+            let cloned = ingest::clone_repo(&entry.url, &repos_dir, token.as_deref())
+                .map_err(|e| fail(e.to_string(), &state, job_id))?;
+            (cloned.path, cloned.repo, cloned.commit_sha)
+        } else {
+            let root = std::fs::canonicalize(base.join(&entry.url))
+                .map_err(|e| fail(e.to_string(), &state, job_id))?;
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (root, format!("local/{name}"), "workdir".to_string())
+        };
+        let extraction = extract_tree(&root, &repo, &commit, &entry.layers, &manifest.env)
+            .map_err(|e| fail(e, &state, job_id))?;
+        files += extraction
+            .nodes
+            .iter()
+            .filter(|n| n.label == "File" && n.props.get("placeholder").is_none())
+            .count() as u64;
+        nodes += extraction.nodes.len() as u64;
+        edges += extraction.edges.len() as u64;
+        {
+            let mut graph = state
+                .graph
+                .lock()
+                .map_err(|e| fail(e.to_string(), &state, job_id))?;
+            load_into_graph(&mut graph, &extraction, &repo, &root, &commit)
+                .map_err(|e| fail(e, &state, job_id))?;
+        }
+        let sha12: String = commit.chars().take(12).collect();
+        repos.push(format!("{repo}@{sha12}"));
+    }
+    let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+    jobs.set_status(job_id, "done").map_err(|e| e.to_string())?;
+    Ok(AddSystemSummary {
+        job_id,
+        repos,
+        files,
+        nodes,
+        edges,
     })
 }
 
@@ -370,7 +496,8 @@ fn main() {
             export_topology,
             export_flows,
             list_flows,
-            add_repo
+            add_repo,
+            add_system
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cartograph");
@@ -428,8 +555,14 @@ mod tests {
         assert_eq!(cloned.repo, "local/shop");
         assert_eq!(cloned.commit_sha.len(), 40);
 
-        let extraction =
-            crate::extract_tree(&cloned.path, &cloned.repo, &cloned.commit_sha).unwrap();
+        let extraction = crate::extract_tree(
+            &cloned.path,
+            &cloned.repo,
+            &cloned.commit_sha,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         let ep = extraction
             .nodes
             .iter()
@@ -489,7 +622,8 @@ export function beat() { bus.emit('heartbeat'); }
             (a.path(), "acme/one", "a".repeat(40)),
             (b.path(), "acme/two", "b".repeat(40)),
         ] {
-            let ex = crate::extract_tree(dir, repo, &sha).unwrap();
+            let ex = crate::extract_tree(dir, repo, &sha, &[], &std::collections::BTreeMap::new())
+                .unwrap();
             crate::load_into_graph(&mut store, &ex, repo, dir, &sha).unwrap();
         }
 
@@ -511,6 +645,81 @@ export function beat() { bus.emit('heartbeat'); }
         let chans = store.nodes_with_label("Channel").unwrap();
         assert_eq!(chans.len(), 1);
         assert_eq!(chans[0].id, "chan:inproc-event:heartbeat");
+    }
+
+    #[test]
+    fn system_manifest_applies_hints_and_identities_at_ingest() {
+        // AC-0002 end to end: two local repos declared in one manifest —
+        // the infra-hinted repo's TS is skipped, and a producer whose
+        // queue URL no env file defines resolves through the manifest's
+        // declared identity.
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("server");
+        let infra = dir.path().join("infra");
+        std::fs::create_dir_all(&server).unwrap();
+        std::fs::create_dir_all(&infra).unwrap();
+        std::fs::write(
+            server.join("send.ts"),
+            r#"
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+const sqs = new SQSClient({});
+export function push() {
+  return sqs.send(new SendMessageCommand({ QueueUrl: process.env.ORDERS_QUEUE }));
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            infra.join("main.tf"),
+            "resource \"aws_sqs_queue\" \"orders\" {}\n",
+        )
+        .unwrap();
+        // A .ts file in the infra repo that the layer hint must skip.
+        std::fs::write(infra.join("script.ts"), "export function x() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("cartograph.system.toml"),
+            r#"
+[[repos]]
+url = "./server"
+layers = ["server", "events"]
+
+[[repos]]
+url = "./infra"
+layers = ["infra"]
+
+[env]
+ORDERS_QUEUE = "https://sqs.example/orders"
+"#,
+        )
+        .unwrap();
+
+        let manifest = ingest::manifest::SystemManifest::load(dir.path()).unwrap();
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        for entry in &manifest.repos {
+            let root = std::fs::canonicalize(dir.path().join(&entry.url)).unwrap();
+            let name = root.file_name().unwrap().to_string_lossy().into_owned();
+            let repo = format!("local/{name}");
+            let ex =
+                crate::extract_tree(&root, &repo, "workdir", &entry.layers, &manifest.env).unwrap();
+            crate::load_into_graph(&mut store, &ex, &repo, &root, "workdir").unwrap();
+        }
+
+        // Layer hint applied: the infra repo contributed no TS facts.
+        let files = store.nodes_with_label("File").unwrap();
+        assert!(files.iter().all(|f| !f.id.contains("script.ts")));
+        assert_eq!(store.nodes_with_label("Resource").unwrap().len(), 1);
+
+        // Manifest identity applied: the env-ref channel resolved Confirmed
+        // via the manifest, not a Gap.
+        let chans = store.nodes_with_label("Channel").unwrap();
+        assert_eq!(chans.len(), 1);
+        assert_eq!(chans[0].id, "chan:sqs-queue:https://sqs.example/orders");
+        assert!(store.nodes_with_label("Gap").unwrap().is_empty());
+        let publish = store.edges_with_labels(&["PUBLISHES"]).unwrap();
+        assert_eq!(
+            publish[0].props["resolver"],
+            "config:cartograph.system.toml"
+        );
     }
 
     #[test]

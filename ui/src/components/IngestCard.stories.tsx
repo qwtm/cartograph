@@ -32,6 +32,25 @@ export const WithSummary: Story = {
   args: { summary: { job_id: 3, files: 12, nodes: 84, edges: 141 } },
 };
 
+// AC-0002: a system add lists every declared repo with its identity.
+export const WithSystemManifest: Story = {
+  args: {
+    summary: {
+      job_id: 5,
+      files: 5,
+      nodes: 40,
+      edges: 60,
+      repos: ['acme/shop@a1b2c3d4e5f6', 'local/infra@workdir'],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByTestId('system-repos').textContent).toBe(
+      'acme/shop@a1b2c3d4e5f6, local/infra@workdir',
+    );
+  },
+};
+
 // AC-0001: a cloned GitHub repo is listed with its commit SHA.
 export const WithClonedRepo: Story = {
   args: {
