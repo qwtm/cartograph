@@ -295,6 +295,18 @@ fn add_repo(
     })
 }
 
+/// GitHub-ish references clone; anything else is a path relative to the
+/// manifest (local repos in one checkout, the dogfood case). A two-segment
+/// entry like `services/api` is only owner/name shorthand when nothing by
+/// that path exists next to the manifest — never resolved against the
+/// process cwd.
+fn manifest_entry_is_remote(url: &str, base: &std::path::Path) -> bool {
+    url.starts_with("https://")
+        || url.starts_with("git@")
+        || url.starts_with("file://")
+        || (url.split('/').count() == 2 && !base.join(url).exists())
+}
+
 #[derive(Serialize)]
 struct AddSystemSummary {
     job_id: i64,
@@ -345,12 +357,7 @@ fn add_system(
     let mut repos = Vec::new();
     let (mut files, mut nodes, mut edges) = (0u64, 0u64, 0u64);
     for entry in &manifest.repos {
-        // GitHub-ish references clone; anything else is a path relative to
-        // the manifest (local repos in one checkout, the dogfood case).
-        let is_remote = entry.url.starts_with("https://")
-            || entry.url.starts_with("git@")
-            || entry.url.starts_with("file://")
-            || (entry.url.split('/').count() == 2 && !std::path::Path::new(&entry.url).exists());
+        let is_remote = manifest_entry_is_remote(&entry.url, base);
         let (root, repo, commit) = if is_remote {
             let cloned = ingest::clone_repo(&entry.url, &repos_dir, token.as_deref())
                 .map_err(|e| fail(e.to_string(), &state, job_id))?;
@@ -648,13 +655,35 @@ export function beat() { bus.emit('heartbeat'); }
     }
 
     #[test]
+    fn manifest_local_paths_beat_owner_name_shorthand() {
+        // AC-0002 classification: `services/api` next to the manifest is a
+        // local repo; the same shape with nothing on disk is a GitHub
+        // shorthand to clone.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("services/api")).unwrap();
+        assert!(!crate::manifest_entry_is_remote("services/api", dir.path()));
+        assert!(crate::manifest_entry_is_remote("acme/shop", dir.path()));
+        assert!(crate::manifest_entry_is_remote(
+            "https://github.com/acme/shop",
+            dir.path()
+        ));
+        assert!(!crate::manifest_entry_is_remote(
+            "./services/api",
+            dir.path()
+        ));
+    }
+
+    #[test]
     fn system_manifest_applies_hints_and_identities_at_ingest() {
         // AC-0002 end to end: two local repos declared in one manifest —
         // the infra-hinted repo's TS is skipped, and a producer whose
         // queue URL no env file defines resolves through the manifest's
         // declared identity.
         let dir = tempfile::tempdir().unwrap();
-        let server = dir.path().join("server");
+        // `services/api`: two segments, exactly the shape of owner/name
+        // shorthand — must classify as local because it exists next to the
+        // manifest (never resolved against the process cwd).
+        let server = dir.path().join("services").join("api");
         let infra = dir.path().join("infra");
         std::fs::create_dir_all(&server).unwrap();
         std::fs::create_dir_all(&infra).unwrap();
@@ -680,7 +709,7 @@ export function push() {
             dir.path().join("cartograph.system.toml"),
             r#"
 [[repos]]
-url = "./server"
+url = "services/api"
 layers = ["server", "events"]
 
 [[repos]]
