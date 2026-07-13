@@ -310,6 +310,88 @@ fn iam_policy_grants_reference_target_resources_with_actions() {
 }
 
 #[test]
+fn iam_wildcard_actions_and_scopes_remain_visible() {
+    // AC-0042 (T-0042): deterministic extraction must retain the exact
+    // wildcard inputs that drive the security projection.
+    let source = r#"
+data "aws_iam_policy_document" "admin" {
+  statement {
+    actions   = ["*"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "admin" {
+  policy = data.aws_iam_policy_document.admin.json
+}
+"#;
+    let ex = extract_source(source, "admin.tf", &id()).unwrap();
+    let grant = ex.edges.iter().find(|edge| edge.label == "GRANTS").unwrap();
+    assert_eq!(grant.props["actions"], serde_json::json!(["*"]));
+    assert_eq!(grant.props["resource_scopes"], serde_json::json!(["*"]));
+    assert_eq!(
+        grant.dst,
+        "res:qwtm/infra@data.aws_iam_policy_document.admin"
+    );
+
+    let scope_only = source.replace("actions   = [\"*\"]", "actions   = [\"s3:GetObject\"]");
+    let scope_only = extract_source(&scope_only, "scope.tf", &id()).unwrap();
+    let grant = scope_only
+        .edges
+        .iter()
+        .find(|edge| edge.label == "GRANTS")
+        .unwrap();
+    assert_eq!(grant.props["actions"], serde_json::json!(["s3:GetObject"]));
+    assert_eq!(grant.props["resource_scopes"], serde_json::json!(["*"]));
+
+    // Each resolved edge carries only the actions from statements that name
+    // its resource; NotAction must never be parsed as Action.
+    let statement_scoped = r#"
+resource "aws_s3_bucket" "admin" {}
+resource "aws_s3_bucket" "uploads" {}
+
+data "aws_iam_policy_document" "mixed" {
+  statement {
+    actions   = ["*"]
+    resources = [aws_s3_bucket.admin.arn]
+  }
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = [aws_s3_bucket.uploads.arn]
+  }
+  statement {
+    not_actions = ["*"]
+    resources   = [aws_s3_bucket.uploads.arn]
+  }
+}
+
+resource "aws_iam_policy" "mixed" {
+  policy = data.aws_iam_policy_document.mixed.json
+}
+"#;
+    let scoped = extract_source(statement_scoped, "mixed.tf", &id()).unwrap();
+    let grants = scoped
+        .edges
+        .iter()
+        .filter(|edge| edge.label == "GRANTS")
+        .collect::<Vec<_>>();
+    assert_eq!(grants.len(), 2);
+    let admin = grants
+        .iter()
+        .find(|edge| edge.dst.ends_with("aws_s3_bucket.admin"))
+        .unwrap();
+    assert_eq!(admin.props["actions"], serde_json::json!(["*"]));
+    let uploads = grants
+        .iter()
+        .find(|edge| edge.dst.ends_with("aws_s3_bucket.uploads"))
+        .unwrap();
+    assert_eq!(
+        uploads.props["actions"],
+        serde_json::json!(["s3:GetObject"])
+    );
+}
+
+#[test]
 fn iam_policy_grants_chase_same_extraction_policy_document() {
     // AC-0047: a defined policy document is an intermediate contract, not the
     // terminal resource granted by the IAM policy.
@@ -361,10 +443,11 @@ resource "aws_iam_policy" "orders" {
     );
     for edge in ex.edges.iter().filter(|edge| edge.label == "GRANTS") {
         let actions: Vec<String> = serde_json::from_value(edge.props["actions"].clone()).unwrap();
-        assert_eq!(
-            actions,
-            vec!["kms:Decrypt", "kms:GenerateDataKey", "sqs:SendMessage"]
-        );
+        if edge.dst.ends_with("aws_s3_bucket.orders") {
+            assert_eq!(actions, vec!["kms:GenerateDataKey"]);
+        } else {
+            assert_eq!(actions, vec!["kms:Decrypt", "sqs:SendMessage"]);
+        }
         assert_eq!(
             edge.props["policy_document"],
             "res:qwtm/infra@data.aws_iam_policy_document.orders"
