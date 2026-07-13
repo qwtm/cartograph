@@ -360,9 +360,12 @@ fn stitch_backings(graph: &mut SqliteGraphStore) -> Result<u64, String> {
     Ok(inserted)
 }
 
-/// Re-evaluate explicit found-ADR target ids against the complete graph.
+/// Reconcile explicit found-ADR target ids against the complete graph.
 /// Each repo is initially extracted in isolation, but decisions in a docs
 /// repo may govern facts loaded later from another repo in the same system.
+/// A rescan first drops links previously owned by that repo's found ADRs and
+/// removes ADR nodes whose source file disappeared, so re-ingest cannot retain
+/// declarations that are no longer present.
 fn relink_found_adrs(graph: &mut SqliteGraphStore) -> Result<u64, String> {
     let repos = graph
         .nodes_with_label("Repo")
@@ -387,6 +390,32 @@ fn relink_found_adrs(graph: &mut SqliteGraphStore) -> Result<u64, String> {
         let commit = repo_node.props["commit"].as_str().unwrap_or("workdir");
         let facts = spec::extract_found_adrs(root, repo, commit, &candidates)
             .map_err(|error| error.to_string())?;
+
+        let adr_prefix = format!("adr:{repo}@");
+        let existing_ids = graph
+            .nodes_with_label("ADR")
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|node| {
+                node.id.starts_with(&adr_prefix) && node.props["origin"].as_str() == Some("found")
+            })
+            .map(|node| node.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let current_ids = facts
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for adr_id in existing_ids.union(&current_ids) {
+            graph
+                .delete_edges_from_with_label(adr_id, "DECIDES")
+                .map_err(|error| error.to_string())?;
+        }
+        for stale_id in existing_ids.difference(&current_ids) {
+            graph
+                .delete_node(stale_id)
+                .map_err(|error| error.to_string())?;
+        }
         for node in facts.nodes {
             graph.put_node(&node).map_err(|error| error.to_string())?;
         }
@@ -1364,6 +1393,27 @@ resource "aws_sqs_queue" "orders" {
         );
         assert_eq!(decides[0].dst, "sym:local/service@app.ts#handle");
         assert_eq!(decides[0].props["prov"]["confidence_tier"], "Confirmed");
+
+        // Removing the declaration reconciles the previously confirmed edge;
+        // it must not survive as a zombie after the next deterministic pass.
+        std::fs::write(
+            docs.join("docs/adr/ADR-0001-service.md"),
+            "# Service ownership\n\n- **Status:** Accepted\n",
+        )
+        .unwrap();
+        crate::relink_found_adrs(&mut store).unwrap();
+        assert!(store.edges_with_labels(&["DECIDES"]).unwrap().is_empty());
+
+        // Removing the source file reconciles the found ADR node as well.
+        std::fs::remove_file(docs.join("docs/adr/ADR-0001-service.md")).unwrap();
+        crate::relink_found_adrs(&mut store).unwrap();
+        assert!(
+            store
+                .nodes_with_label("ADR")
+                .unwrap()
+                .into_iter()
+                .all(|node| node.id != "adr:local/docs-repo@docs/adr/ADR-0001-service.md")
+        );
     }
 
     #[test]

@@ -16,7 +16,9 @@ disposable spec projection.
 - T0 scans confined Markdown ADR/RFC paths and creates Confirmed `ADR` nodes.
   It creates `DECIDES` edges only for existing graph ids explicitly listed by
   `Governs:` or cited exactly in backticks. After every repo is loaded, a
-  deterministic relink pass evaluates those ids against the full system graph.
+  deterministic reconciliation pass evaluates those ids against the full
+  system graph, replaces the repo's prior found-ADR links, and removes found
+  ADR nodes whose source file disappeared.
 - An optional `Forbids:` field lists uppercase graph-edge labels. It is an
   explicit, deterministic author constraint rather than a natural-language
   guess.
@@ -34,6 +36,8 @@ disposable spec projection.
 ## Consequences
 - Found author intent is clearly separated from recovered proposed intent.
 - T0 linking fails closed when target ids are ambiguous or absent.
+- Re-ingest removes stale found decisions and links instead of retaining
+  previously confirmed declarations as graph zombies.
 - Drift findings are reproducible and directly traceable to decision text,
   graph evidence, and flows.
 - Broader natural-language decision recovery can extend the T2/T3 projection

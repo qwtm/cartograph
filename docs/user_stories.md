@@ -152,7 +152,7 @@
 - **Actor:** Engine
 - **As a** engineer **I want** found and recovered ADRs linked to governed targets, with conflicts surfaced **so that** decisions and drift are visible.
 - **Priority:** Should · **Status:** Done
-- **AC-0036** Given existing Markdown ADR/RFC files, when parsed, then explicit `Governs:` or exact backtick target ids link to existing full-system graph targets as Confirmed facts, including targets from another repo.
+- **AC-0036** Given existing Markdown ADR/RFC files, when parsed or re-ingested, then explicit `Governs:` or exact backtick target ids link to existing full-system graph targets as Confirmed facts, including targets from another repo, while removed declarations and deleted ADR files remove their prior links and found nodes.
 - **AC-0037** Given evidence-backed channel architecture, when recovered ADRs are drafted, then they are marked recovered/inferred, cite the producing graph evidence, remain curatable, and cannot survive rejection of their supporting facts.
 - **AC-0038** Given a found ADR with an explicit `Forbids:` edge constraint, when governed code conflicts, then a confidence-preserving finding appears in the Drift register mapped to the offending edge and any containing flow, unless that supporting edge was rejected.
 - **Security:** —
