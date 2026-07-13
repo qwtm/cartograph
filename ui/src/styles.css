@@ -393,3 +393,174 @@ button:disabled {
   border-radius: 3px;
   outline: 1px solid var(--tier-confirmed);
 }
+
+/* Cloud egress consent: exact payload visibility is a security control, not
+   decoration. Long hashes, paths, prompts, and spans must remain readable. */
+.egress-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  padding: 2rem;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+}
+
+.egress-dialog {
+  width: min(820px, 100%);
+  max-height: calc(100vh - 4rem);
+  overflow: auto;
+  padding: 1.25rem;
+  border: 1px solid var(--tier-inferred-weak);
+  border-radius: 12px;
+  background: var(--surface-container);
+  box-shadow: 0 20px 70px rgb(0 0 0 / 45%);
+}
+
+.egress-heading,
+.egress-actions,
+.egress-span-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.egress-heading h2 {
+  margin-top: 0.2rem;
+  font-size: 1.15rem;
+}
+
+.egress-kicker {
+  color: var(--tier-inferred-weak);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.egress-dialog > .muted {
+  margin-top: 0.8rem;
+  line-height: 1.5;
+}
+
+.egress-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 1rem 0;
+}
+
+.egress-meta > div {
+  min-width: 0;
+  padding: 0.6rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-container-high);
+}
+
+.egress-meta > div:last-child {
+  grid-column: 1 / -1;
+}
+
+.egress-meta dt,
+.egress-section h3 {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.egress-meta dd {
+  margin-top: 0.25rem;
+}
+
+.egress-hash {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+}
+
+.egress-section {
+  margin-top: 0.9rem;
+}
+
+.egress-section pre,
+.egress-spans pre {
+  margin-top: 0.4rem;
+  padding: 0.65rem;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: #0e0e0e;
+  color: var(--on-surface);
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.egress-spans {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.egress-spans li {
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--outline-variant);
+  border-radius: 8px;
+}
+
+.egress-span-meta {
+  align-items: baseline;
+  font-size: 0.78rem;
+}
+
+.egress-span-meta span {
+  min-width: 0;
+  color: var(--on-surface-variant);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.egress-actions {
+  justify-content: flex-end;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 600px) {
+  .egress-backdrop {
+    padding: 0;
+  }
+
+  .egress-dialog {
+    max-height: 100vh;
+    min-height: 100vh;
+    border-radius: 0;
+  }
+
+  .egress-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .egress-meta > div:last-child {
+    grid-column: auto;
+  }
+
+  .egress-span-meta {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .egress-span-meta span {
+    text-align: left;
+  }
+}

@@ -139,6 +139,30 @@ PR — per-PR verification is CI's job.
    Gap and unresolved relative-import call Gap without adding gaps for globals
    or package calls (AC-0021, AC-0022, R-INT-1, M7 exit gate).
 
+## MT-M8-01 — Bounded T3, exact egress consent, and durable curation
+
+1. Run `cargo test -p llm -p agents`. Confirm the local-only cloud test
+   reports zero provider calls, and the bounded broker rejects Confirmed slots,
+   invented targets, and missing both-side citations before staging anything.
+2. Run `npm --prefix ui run storybook` and open
+   **Privacy / EgressConsentDialog / ExactSpanPayload**.
+3. Compare every displayed field with the story's firewall preview fixture:
+   provider, tier, one-action id, system instructions, prompt, both repo/path/
+   byte/commit spans, redacted span text, redaction count, and payload hash.
+   Resize below 600 px and confirm no payload text is clipped or hidden.
+4. Click **Allow this action once**. **Pass:** the interaction fires only the
+   consent callback with that complete preview; no unredacted secret appears.
+5. Run
+   `cargo test -p agents accepted_and_rejected_decisions_persist_and_reapply_by_basis`.
+   **Pass:** the final accept/reject state survives SQLite reopen and reappears
+   for the unchanged task basis, while changed evidence has no inherited
+   decision.
+6. With Ollama and `qwen3:8b` already installed locally, run
+   `cargo test -p agents real_ollama_returns_bounded_cited_agent_proposal -- --ignored --nocapture`.
+   Stop Ollama and repeat. **Pass:** local failure
+   is explicit and no cloud provider is selected; Cartograph never pulls a
+   model automatically (AC-0020, AC-0023..0025, R-INT-1, R-INT-3, M8 exit gate).
+
 ## MT-SB-01 — Stories render on-brand
 
 1. `cd ui && npm run storybook`.

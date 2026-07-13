@@ -24,6 +24,7 @@ ingest = { workspace = true }
 spec = { workspace = true }
 llm = { workspace = true }
 semantic = { workspace = true }
+agents = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

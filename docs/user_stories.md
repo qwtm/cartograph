@@ -85,7 +85,7 @@
 ### US-0007 — Provenance and confidence on every fact
 - **Actor:** Engine
 - **As a** engineer **I want** every node/edge tagged with tier + confidence + evidence **so that** integrity is enforced.
-- **Priority:** Must · **Status:** Ready
+- **Priority:** Must · **Status:** Done
 - **AC-0018** Given any fact, when stored, then it has {tier, confidence_tier, evidence[], extractor_id, content_hash}.
 - **AC-0019** Given a T2/T3 producer, when it runs, then it cannot overwrite or upgrade a T0/T1 fact (R-INT-1).
 - **AC-0020** Given an agent (T3), when it acts, then it can only propose edges/annotations with cited evidence; it cannot write T0/T1 (R-INT-3).
@@ -106,13 +106,13 @@
 ### US-0009 — Bounded agentic tier with egress firewall
 - **Actor:** Engine
 - **As a** engineer **I want** agents to propose resolutions only, with per-tier cloud opt-in **so that** privacy and integrity hold.
-- **Priority:** Should · **Status:** Draft
+- **Priority:** Should · **Status:** Done
 - **AC-0023** Given a Local-only policy, when T3 needs a cloud provider, then it hard-fails closed (no silent egress).
 - **AC-0024** Given cloud opt-in, when an agent runs, then the consent dialog shows the exact span-level payload leaving the device.
 - **AC-0025** Given an agent proposal, when accepted/rejected, then the decision persists and re-applies on re-ingest.
 - **Security:** Default-deny cloud egress; secret redaction on payloads.
 - **Performance:** —
-- **Trace:** M8 · `agents`, `llm` · — · T-0023..0025
+- **Trace:** M8 · `agents`, `llm`, `app`, `ui` · — · T-0023..0025
 
 ### US-0010 — Atlas graph canvas with confidence overlay
 - **Actor:** Engineer
