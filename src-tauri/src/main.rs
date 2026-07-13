@@ -20,6 +20,7 @@ use tauri::{Manager, State};
 struct AppState {
     graph: Mutex<SqliteGraphStore>,
     jobs: Mutex<JobStore>,
+    decisions: Mutex<agents::DecisionLog>,
 }
 
 #[derive(Serialize)]
@@ -110,6 +111,39 @@ fn list_jobs(state: State<'_, AppState>) -> Result<Vec<Job>, String> {
 fn list_evals(state: State<'_, AppState>) -> Result<Vec<EvalResult>, String> {
     let jobs = state.jobs.lock().map_err(|error| error.to_string())?;
     jobs.list_evals().map_err(|error| error.to_string())
+}
+
+/// Persist one human accept/reject decision for a staged T3 proposal.
+#[tauri::command]
+fn record_agent_decision(
+    proposal: agents::AgentProposal,
+    decision: agents::ProposalDecision,
+    note: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<agents::DecisionRecord, String> {
+    let mut decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    decisions
+        .record(&proposal, decision, note.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+/// All durable T3 curation decisions, newest first.
+#[tauri::command]
+fn list_agent_decisions(state: State<'_, AppState>) -> Result<Vec<agents::DecisionRecord>, String> {
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    decisions.list().map_err(|error| error.to_string())
+}
+
+/// Decisions whose exact evidence/candidate basis still matches a re-ingest.
+#[tauri::command]
+fn reapply_agent_decisions(
+    basis_hash: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<agents::DecisionRecord>, String> {
+    let decisions = state.decisions.lock().map_err(|error| error.to_string())?;
+    decisions
+        .reapply(&basis_hash)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Serialize)]
@@ -754,10 +788,13 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let graph = SqliteGraphStore::open(data_dir.join("graph.db"))?;
-            let jobs = JobStore::open(data_dir.join("state.db"))?;
+            let state_path = data_dir.join("state.db");
+            let jobs = JobStore::open(&state_path)?;
+            let decisions = agents::DecisionLog::open(&state_path)?;
             app.manage(AppState {
                 graph: Mutex::new(graph),
                 jobs: Mutex::new(jobs),
+                decisions: Mutex::new(decisions),
             });
             Ok(())
         })
@@ -768,6 +805,9 @@ fn main() {
             enqueue_job,
             list_jobs,
             list_evals,
+            record_agent_decision,
+            list_agent_decisions,
+            reapply_agent_decisions,
             ingest_path,
             list_nodes,
             read_evidence,

@@ -9,3 +9,5 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+blake3 = { workspace = true }
+regex = { workspace = true }
