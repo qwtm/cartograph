@@ -612,7 +612,10 @@ pub fn gated_proposals(proposals: &[SemanticProposal], eval: &EvalReport) -> Vec
     let mut seen = BTreeSet::new();
     ordered
         .into_iter()
-        .filter(|proposal| proposal.similarity >= eval.similarity_threshold)
+        // Calibration uses exact cosine math while ANN proposal scores come
+        // from USearch. Permit only the sub-micro rounding difference between
+        // those backends; materially sub-threshold links still fail closed.
+        .filter(|proposal| proposal.similarity + 1.0e-6 >= eval.similarity_threshold)
         .filter(|proposal| seen.insert(proposal.gap_id.clone()))
         .collect()
 }
@@ -952,6 +955,25 @@ mod tests {
         assert_eq!(edge.props["prov"]["tier"], "Semantic");
         assert_eq!(edge.props["prov"]["confidence_tier"], "InferredStrong");
         assert!(nodes.iter().any(|node| node.label == "Gap"));
+    }
+
+    #[test]
+    fn gating_tolerates_only_backend_rounding_at_the_calibrated_threshold() {
+        // AC-0022: exact evaluator cosine and ANN cosine can differ by one
+        // floating-point rounding step without changing the calibrated gate.
+        let (nodes, edges) = graph();
+        let (hops, candidates) = graph_inputs(&nodes, &edges);
+        let mut proposal = propose(&KeywordProvider, &hops, &candidates, 1)
+            .unwrap()
+            .remove(0);
+        let mut report = evaluate(&KeywordProvider, &eval_pairs(), 0.95).unwrap();
+        report.similarity_threshold = 1.0;
+
+        proposal.similarity = 0.999_999_94;
+        assert_eq!(gated_proposals(&[proposal.clone()], &report).len(), 1);
+
+        proposal.similarity = 0.999;
+        assert!(gated_proposals(&[proposal], &report).is_empty());
     }
 
     #[test]
