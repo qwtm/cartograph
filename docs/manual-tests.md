@@ -231,6 +231,9 @@ PR — per-PR verification is CI's job.
 2. Ingest the system and open the Workbench **Architecture decisions** artifact.
    **Pass:** the found ADR and DECIDES link are Confirmed with exact file/span
    evidence; unrelated or nonexistent ids are not linked (AC-0036).
+   Remove the `Governs` declaration and re-ingest. **Pass:** its former DECIDES
+   link is absent. Delete the ADR file and re-ingest. **Pass:** its found ADR
+   node is absent (AC-0036).
 3. Include a code producer and channel not governed by a found ADR. **Pass:**
    the artifact includes a distinct **Recovered / Inferred** ADR with graph
    evidence and curation controls; it is never displayed as Confirmed

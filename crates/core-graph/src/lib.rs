@@ -51,6 +51,10 @@ pub trait GraphStore {
     fn put_node(&mut self, node: &Node) -> Result<(), GraphError>;
     /// Insert or replace an edge by (src, dst, label).
     fn put_edge(&mut self, edge: &Edge) -> Result<(), GraphError>;
+    /// Delete outgoing edges from `src` carrying `label`.
+    fn delete_edges_from_with_label(&mut self, src: &str, label: &str) -> Result<(), GraphError>;
+    /// Delete a node and all of its incident edges.
+    fn delete_node(&mut self, id: &str) -> Result<(), GraphError>;
     /// Fetch a node by id.
     fn get_node(&self, id: &str) -> Result<Option<Node>, GraphError>;
     /// Number of nodes.
@@ -148,6 +152,22 @@ impl GraphStore for SqliteGraphStore {
                 serde_json::to_string(&edge.props)?
             ],
         )?;
+        Ok(())
+    }
+
+    fn delete_edges_from_with_label(&mut self, src: &str, label: &str) -> Result<(), GraphError> {
+        self.conn.execute(
+            "DELETE FROM edges WHERE src = ?1 AND label = ?2",
+            params![src, label],
+        )?;
+        Ok(())
+    }
+
+    fn delete_node(&mut self, id: &str) -> Result<(), GraphError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM edges WHERE src = ?1 OR dst = ?1", params![id])?;
+        tx.execute("DELETE FROM nodes WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -415,6 +435,31 @@ mod tests {
         }
         assert_eq!(store.node_count().unwrap(), 2);
         assert_eq!(store.edge_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn scoped_deletes_remove_owned_edges_and_incident_node_edges() {
+        let mut store = SqliteGraphStore::open_in_memory().unwrap();
+        for id in ["adr:a", "adr:b", "target"] {
+            store.put_node(&node(id, "Resource")).unwrap();
+        }
+        store.put_edge(&edge("adr:a", "target", "DECIDES")).unwrap();
+        store
+            .put_edge(&edge("adr:a", "target", "REFERENCES"))
+            .unwrap();
+        store.put_edge(&edge("adr:b", "target", "DECIDES")).unwrap();
+
+        store
+            .delete_edges_from_with_label("adr:a", "DECIDES")
+            .unwrap();
+        let edges = store.all_edges().unwrap();
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|edge| edge.label == "REFERENCES"));
+        assert!(edges.iter().any(|edge| edge.src == "adr:b"));
+
+        store.delete_node("target").unwrap();
+        assert!(store.get_node("target").unwrap().is_none());
+        assert!(store.all_edges().unwrap().is_empty());
     }
 
     #[test]
