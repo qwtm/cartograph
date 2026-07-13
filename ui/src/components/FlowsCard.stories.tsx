@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, userEvent, within } from 'storybook/test';
 import type { Flow, FlowHop, Tier } from '../store';
-import { FlowsCard, projectedDossier } from './FlowsCard';
+import { FlowsCard, flowElements, projectedDossier } from './FlowsCard';
 
 function hop(
   label: string,
@@ -76,6 +76,19 @@ const PARTIAL: Flow = {
 
 const FLOWS = [VERIFIED, PARTIAL];
 const SAMPLE = projectedDossier(FLOWS, 'best-effort');
+const BRANCHED: Flow = {
+  trigger: 'ep:POST:/branch',
+  trigger_kind: 'Endpoint',
+  trigger_name: 'POST /branch',
+  hops: [
+    hop('HANDLES', 'ep:POST:/branch', 'sym:branch#handle', 'POST /branch', 'branchHandler', 'Confirmed'),
+    hop('CALLS', 'sym:branch#handle', 'sym:branch#helper', 'branchHandler', 'helper', 'Confirmed'),
+    hop('PUBLISHES', 'sym:branch#handle', 'channel:orders', 'branchHandler', 'orders.created', 'Confirmed'),
+  ],
+  status: 'Verified',
+  score: 1,
+  depth_limited: false,
+};
 const UNKNOWN_CONFIDENCE: Flow = {
   ...VERIFIED,
   trigger: 'ep:GET:/unknown',
@@ -133,6 +146,29 @@ export const ExplicitGap: Story = {
     await expect(gap).toHaveTextContent('runtime-computed channel identity');
     await expect(gap).toHaveTextContent('T0 → T1 → T2 → T3');
     await expect(gap).toHaveTextContent('T0 · Gap');
+  },
+};
+
+export const BranchedTraceUsesRecordedEndpoints: Story = {
+  args: { flows: [BRANCHED], dossier: projectedDossier([BRANCHED], 'best-effort') },
+  play: async ({ canvasElement }) => {
+    const graph = flowElements(BRANCHED);
+    const handler = graph.nodes.find(
+      (node) => node.data.kind === 'entity' && node.data.entityId === 'sym:branch#handle',
+    );
+    const channel = graph.nodes.find(
+      (node) => node.data.kind === 'entity' && node.data.entityId === 'channel:orders',
+    );
+    const publishes = graph.edges.find((edge) => edge.label?.toString().startsWith('PUBLISHES'));
+    await expect(publishes).toMatchObject({ source: handler?.id, target: channel?.id });
+
+    const dossier = projectedDossier([BRANCHED], 'best-effort');
+    await expect(dossier).toContain('p1->>p2: CALLS [Confirmed]');
+    await expect(dossier).toContain('p1->>p3: PUBLISHES [Confirmed]');
+    await expect(dossier).not.toContain('p2->>p3: PUBLISHES [Confirmed]');
+    await expect(within(canvasElement).getByLabelText('Flow sequence')).toHaveTextContent(
+      'branchHandler → orders.created',
+    );
   },
 };
 

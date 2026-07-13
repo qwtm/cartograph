@@ -91,31 +91,26 @@ function attemptedEscalation(hop: FlowHop): string {
   return hop.attempted_tiers.length > 0 ? hop.attempted_tiers.join(' → ') : 'not recorded';
 }
 
-function HopNode({ hop }: { hop: FlowHop }) {
-  const confidence = hopConfidence(hop);
-  const gap = confidence === 'Gap' || hop.gap_reason !== null;
+function EntityNode({ entityId, name, gapHop }: { entityId: string; name: string; gapHop: FlowHop | null }) {
   return (
-    <div className={`flow-node-content ${gap ? 'unresolved' : ''}`}>
+    <div className={`flow-node-content ${gapHop ? 'unresolved' : ''}`}>
       <div className="flow-node-head">
-        <span>{gap ? 'Unresolved hop' : hop.label}</span>
-        <span className={`tier-badge ${CONFIDENCE_CLASS[confidence]}`}>
-          {tierLabel(hop.tier)} · {confidence}
-        </span>
+        <span>{gapHop ? 'Unresolved target' : 'Flow node'}</span>
       </div>
-      <strong>{hop.dst_name}</strong>
-      {gap ? (
+      <strong>{name}</strong>
+      {gapHop ? (
         <dl className="flow-gap-details">
           <div>
             <dt>Reason</dt>
-            <dd>{gapReason(hop)}</dd>
+            <dd>{gapReason(gapHop)}</dd>
           </div>
           <div>
             <dt>Attempted escalation</dt>
-            <dd>{attemptedEscalation(hop)}</dd>
+            <dd>{attemptedEscalation(gapHop)}</dd>
           </div>
         </dl>
       ) : (
-        <span className="muted">{hop.evidence ?? 'No evidence reference recorded'}</span>
+        <span className="muted">{entityId}</span>
       )}
     </div>
   );
@@ -123,20 +118,20 @@ function HopNode({ hop }: { hop: FlowHop }) {
 
 type InspectorNodeData =
   | { kind: 'trigger'; triggerKind: string; name: string }
-  | { kind: 'hop'; hop: FlowHop };
+  | { kind: 'entity'; entityId: string; name: string; gapHop: FlowHop | null };
 type InspectorNode = Node<InspectorNodeData, 'inspector'>;
 
 function InspectorNodeCard({ data }: NodeProps<InspectorNode>) {
   return (
     <>
-      {data.kind === 'hop' && <Handle type="target" position={Position.Left} />}
+      {data.kind === 'entity' && <Handle type="target" position={Position.Left} />}
       {data.kind === 'trigger' ? (
         <div className="flow-node-content trigger">
           <span>Trigger · {data.triggerKind}</span>
           <strong>{data.name}</strong>
         </div>
       ) : (
-        <HopNode hop={data.hop} />
+        <EntityNode entityId={data.entityId} name={data.name} gapHop={data.gapHop} />
       )}
       <Handle type="source" position={Position.Right} />
     </>
@@ -145,44 +140,111 @@ function InspectorNodeCard({ data }: NodeProps<InspectorNode>) {
 
 const NODE_TYPES: NodeTypes = { inspector: InspectorNodeCard };
 
-function flowElements(flow: Flow): { nodes: Node[]; edges: Edge[] } {
-  const nodes: InspectorNode[] = [
-    {
-      id: 'trigger',
+interface FlowEntity {
+  id: string;
+  name: string;
+  gapHop: FlowHop | null;
+}
+
+function flowEntities(flow: Flow): FlowEntity[] {
+  const entities = new Map<string, FlowEntity>();
+  entities.set(flow.trigger, { id: flow.trigger, name: flow.trigger_name, gapHop: null });
+  const add = (id: string, name: string, gapHop: FlowHop | null) => {
+    const existing = entities.get(id);
+    if (existing) {
+      if (gapHop && !existing.gapHop) existing.gapHop = gapHop;
+      return;
+    }
+    entities.set(id, { id, name, gapHop });
+  };
+  for (const hop of flow.hops) {
+    add(hop.src, hop.src_name, null);
+    const confidence = hopConfidence(hop);
+    add(hop.dst, hop.dst_name, confidence === 'Gap' || hop.gap_reason !== null ? hop : null);
+  }
+  return [...entities.values()];
+}
+
+function entityDepths(flow: Flow): Map<string, number> {
+  const outgoing = new Map<string, string[]>();
+  for (const hop of flow.hops) {
+    const destinations = outgoing.get(hop.src) ?? [];
+    destinations.push(hop.dst);
+    outgoing.set(hop.src, destinations);
+  }
+  const depths = new Map([[flow.trigger, 0]]);
+  const queue = [flow.trigger];
+  while (queue.length > 0) {
+    const source = queue.shift();
+    if (!source) break;
+    const nextDepth = (depths.get(source) ?? 0) + 1;
+    for (const destination of outgoing.get(source) ?? []) {
+      if (depths.has(destination)) continue;
+      depths.set(destination, nextDepth);
+      queue.push(destination);
+    }
+  }
+  return depths;
+}
+
+/** Build one card per recorded endpoint and connect every hop by its actual
+ * src/dst ids. This must not infer sequence edges from array position. */
+export function flowElements(flow: Flow): { nodes: InspectorNode[]; edges: Edge[] } {
+  const entities = flowEntities(flow);
+  const aliases = new Map(entities.map((entity, index) => [entity.id, `entity-${index}`]));
+  const depths = entityDepths(flow);
+  let fallbackDepth = Math.max(...depths.values(), 0) + 1;
+  for (const entity of entities) {
+    if (!depths.has(entity.id)) depths.set(entity.id, fallbackDepth++);
+  }
+  const columns = new Map<number, FlowEntity[]>();
+  for (const entity of entities) {
+    const depth = depths.get(entity.id) ?? 0;
+    columns.set(depth, [...(columns.get(depth) ?? []), entity]);
+  }
+  const nodes: InspectorNode[] = entities.map((entity) => {
+    const depth = depths.get(entity.id) ?? 0;
+    const column = columns.get(depth) ?? [entity];
+    const row = column.findIndex((candidate) => candidate.id === entity.id);
+    const y = (row - (column.length - 1) / 2) * 190;
+    const base = {
+      id: aliases.get(entity.id) ?? entity.id,
       type: 'inspector',
-      position: { x: 0, y: 0 },
-      data: { kind: 'trigger', triggerKind: flow.trigger_kind, name: flow.trigger_name },
-      className: 'flow-inspector-node trigger',
+      position: { x: depth * 470, y },
       draggable: false,
       connectable: false,
-    },
-  ];
-  const edges: Edge[] = [];
-  flow.hops.forEach((hop, index) => {
-    const id = `hop-${index}`;
+    } as const;
+    if (entity.id === flow.trigger) {
+      return {
+        ...base,
+        data: { kind: 'trigger', triggerKind: flow.trigger_kind, name: flow.trigger_name },
+        className: 'flow-inspector-node trigger',
+      };
+    }
+    return {
+      ...base,
+      data: { kind: 'entity', entityId: entity.id, name: entity.name, gapHop: entity.gapHop },
+      className: `flow-inspector-node ${entity.gapHop ? 'unresolved' : ''}`,
+    };
+  });
+  const edges: Edge[] = flow.hops.map((hop, index) => {
     const confidence = hopConfidence(hop);
     const gap = confidence === 'Gap' || hop.gap_reason !== null;
-    nodes.push({
-      id,
-      type: 'inspector',
-      position: { x: (index + 1) * 330, y: 0 },
-      data: { kind: 'hop', hop },
-      className: `flow-inspector-node ${gap ? 'unresolved' : ''}`,
-      draggable: false,
-      connectable: false,
-    });
-    edges.push({
+    return {
       id: `edge-${index}`,
-      source: index === 0 ? 'trigger' : `hop-${index - 1}`,
-      target: id,
-      label: hop.label,
+      source: aliases.get(hop.src) ?? hop.src,
+      target: aliases.get(hop.dst) ?? hop.dst,
+      label: `${hop.label} · ${tierLabel(hop.tier)} · ${confidence}`,
       markerEnd: { type: MarkerType.ArrowClosed, color: CONFIDENCE_COLOR[confidence] },
       style: {
         stroke: CONFIDENCE_COLOR[confidence],
         strokeDasharray: gap ? '6 5' : undefined,
       },
       labelStyle: { fill: '#c1c6d5', fontSize: 10 },
-    });
+      labelBgStyle: { fill: '#0e0e0e', fillOpacity: 0.92 },
+      labelBgPadding: [6, 4],
+      labelBgBorderRadius: 4,
+    };
   });
   return { nodes, edges };
 }
@@ -203,13 +265,22 @@ export function projectedDossier(flows: Flow[], mode: FlowExportMode): string {
     const flow = projectFlow(original, mode);
     lines.push(`## ${flow.trigger_name} — ${flow.status} (score ${flow.score.toFixed(2)})`, '');
     lines.push(`Trigger: ${flow.trigger_kind} \`${flow.trigger}\``, '', '```mermaid', 'sequenceDiagram');
-    const names = [flow.trigger_name, ...flow.hops.map((hop) => hop.dst_name)];
-    names.forEach((name, index) => lines.push(`    participant p${index} as ${mermaidSafe(name)}`));
-    flow.hops.forEach((hop, index) => {
+    const participants: Array<{ id: string; name: string }> = [];
+    const alias = (id: string, name: string): string => {
+      const existing = participants.findIndex((participant) => participant.id === id);
+      if (existing >= 0) return `p${existing}`;
+      participants.push({ id, name });
+      return `p${participants.length - 1}`;
+    };
+    const arrows = flow.hops.map((hop) => {
+      const source = alias(hop.src, hop.src_name);
+      const target = alias(hop.dst, hop.dst_name);
       const confidence = hopConfidence(hop);
       const arrow = confidence === 'Gap' ? '--x' : '->>';
-      lines.push(`    p${index}${arrow}p${index + 1}: ${hop.label} [${confidence}]`);
+      return `    ${source}${arrow}${target}: ${hop.label} [${confidence}]`;
     });
+    participants.forEach((participant, index) => lines.push(`    participant p${index} as ${mermaidSafe(participant.name)}`));
+    lines.push(...arrows);
     lines.push('```', '', '| # | Hop | Tier | Confidence | Evidence |', '|---|-----|------|------------|----------|');
     flow.hops.forEach((hop, index) => {
       lines.push(
