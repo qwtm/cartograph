@@ -39,6 +39,7 @@ test('macOS packaging is exact-ref, universal, fail-closed, and verified', () =>
   assert.match(workflow, /spctl --assess/u);
   assert.match(workflow, /xcrun stapler validate/u);
   assert.match(workflow, /Cartograph_\$\{version\}_universal_\$\{SIGNING_MODE\}/u);
+  assert.match(workflow, /mkdir -p ui\/dist/u);
   assert.match(workflow, /node scripts\/check-traceability\.mjs/u);
   assert.match(workflow, /cargo clippy --workspace --all-targets -- -D warnings/u);
   assert.match(workflow, /npm --prefix ui run build/u);

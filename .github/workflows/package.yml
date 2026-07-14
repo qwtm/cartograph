@@ -72,6 +72,11 @@ jobs:
           npm --prefix ui exec -- playwright install chromium
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Create frontend placeholder for Tauri's Rust macro
+        # generate_context! reads frontendDist while clippy/tests compile the
+        # app crate; the real production UI build still runs in the gate below.
+        run: mkdir -p ui/dist
+
       - name: Run required repository gates
         run: |
           node scripts/check-traceability.mjs
