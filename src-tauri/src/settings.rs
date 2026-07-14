@@ -216,7 +216,6 @@ impl SettingsStore {
 
     /// Record observed cloud egress (called where a consented cloud call
     /// actually completes; the escalation orchestration wires this — #120).
-    #[allow(dead_code)] // consumed by the #120 escalation orchestration; invariants tested below
     pub fn record_egress(&mut self, provider: &str, bytes: u64) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO egress_log (provider, bytes) VALUES (?1, ?2)",
@@ -261,7 +260,6 @@ impl SettingsStore {
     /// Derive the egress firewall policy from persisted settings: cloud is
     /// allowed only for enabled LLM tiers whose provider is `cloud` **and**
     /// which hold standing consent. Everything else stays local-only.
-    #[allow(dead_code)] // consumed by the #120 escalation orchestration; invariants tested below
     pub fn egress_policy(&self) -> rusqlite::Result<llm::EgressPolicy> {
         let mut stmt = self.conn.prepare(
             "SELECT tier FROM tier_settings

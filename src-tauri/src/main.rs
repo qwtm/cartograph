@@ -4,6 +4,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod escalation;
 mod evidence;
 mod findings;
 mod jobs;
@@ -985,6 +986,254 @@ fn extractor_coverage(
     store.latest_coverage().map_err(|e| e.to_string())
 }
 
+/// A closure that loads the exact text of an evidence span, or None.
+type SpanReader = Box<dyn Fn(&core_prov::EvidenceRef) -> Option<String> + Send>;
+
+/// Whole-graph projection plus an evidence reader bound to the ingested
+/// repo roots — the escalation assembly needs both.
+fn graph_and_reader(state: &AppState) -> Result<(Vec<Node>, Vec<Edge>, SpanReader), String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let nodes = graph.all_nodes().map_err(|e| e.to_string())?;
+    let edges = graph.all_edges().map_err(|e| e.to_string())?;
+    let roots: std::collections::BTreeMap<String, String> = nodes
+        .iter()
+        .filter(|node| node.label == "Repo")
+        .filter_map(|node| {
+            let repo = node.id.strip_prefix("repo:")?.to_string();
+            let root = node.props["root"].as_str()?.to_string();
+            Some((repo, root))
+        })
+        .collect();
+    let reader: SpanReader = Box::new(move |reference: &core_prov::EvidenceRef| {
+        let root = roots.get(&reference.repo)?;
+        evidence::read_source(
+            std::path::Path::new(root),
+            &reference.path,
+            &(reference.byte_start..reference.byte_end),
+        )
+        .ok()
+        .map(|window| {
+            let start = (reference.byte_start - window.window_start) as usize;
+            let end = (reference.byte_end - window.window_start) as usize;
+            window
+                .text
+                .get(start..end)
+                .unwrap_or(&window.text)
+                .to_string()
+        })
+    });
+    Ok((nodes, edges, reader))
+}
+
+/// The provider for one escalation mode. Local is the pinned catalog SLM;
+/// cloud is the Opus reasoning lane and needs an API key — its absence is
+/// an explicit error, never a silent local fallback.
+fn escalation_provider(mode: &str) -> Result<Box<dyn LlmProvider>, String> {
+    match mode {
+        "local" => Ok(Box::new(
+            llm::OllamaProvider::local_default().map_err(|e| e.to_string())?,
+        )),
+        "cloud" => {
+            let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+                "no Anthropic API key configured (set ANTHROPIC_API_KEY) — cloud escalation \
+                 stays closed"
+                    .to_string()
+            })?;
+            Ok(Box::new(
+                llm::anthropic::AnthropicProvider::new(llm::anthropic::ClaudeLane::Opus, key)
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        other => Err(format!("unknown escalation mode '{other}' (local | cloud)")),
+    }
+}
+
+/// Strategy cards for one gap (#120): attempted tiers, stop reason, required
+/// evidence, and the local/cloud options with exact egress estimates from
+/// the firewall preview. Derivation only — nothing runs, nothing egresses.
+#[tauri::command]
+fn gap_strategies(
+    gap_id: String,
+    state: State<'_, AppState>,
+) -> Result<escalation::GapStrategyReport, String> {
+    let (nodes, edges, reader) = graph_and_reader(&state)?;
+    let task = escalation::assemble_task(&nodes, &edges, &gap_id, "escalate:preview", &reader)?;
+    let gap = nodes
+        .iter()
+        .find(|node| node.id == gap_id)
+        .ok_or_else(|| format!("no gap named '{gap_id}'"))?;
+    let cloud_allowed = {
+        let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+        settings_store
+            .egress_policy()
+            .map_err(|e| e.to_string())?
+            .cloud_allowed(llm::AnalysisTier::Agentic)
+    };
+    // Exact payload size from the broker's own preview against a local
+    // firewall — same redaction, zero egress.
+    let firewall = llm::EgressFirewall::new(llm::EgressPolicy::default());
+    let local = llm::OllamaProvider::local_default().map_err(|e| e.to_string())?;
+    let preview = agents::AgentBroker::bounded_default()
+        .preview(&local, &firewall, &task)
+        .map_err(|e| e.to_string())?;
+    let payload_bytes = serde_json::to_vec(&preview.payload)
+        .map_err(|e| e.to_string())?
+        .len() as u64;
+    Ok(escalation::strategies(
+        &task,
+        gap,
+        cloud_allowed,
+        payload_bytes,
+    ))
+}
+
+/// The exact redacted payload a cloud escalation would send (#120): the
+/// one-action consent dialog renders this preview, and the grant is bound
+/// to its hash. Zero egress — preview never invokes the provider.
+#[tauri::command]
+fn escalation_preview(
+    gap_id: String,
+    state: State<'_, AppState>,
+) -> Result<llm::EgressPreview, String> {
+    let (nodes, edges, reader) = graph_and_reader(&state)?;
+    let task = escalation::assemble_task(
+        &nodes,
+        &edges,
+        &gap_id,
+        &format!("escalate:{gap_id}"),
+        &reader,
+    )?;
+    let policy = {
+        let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+        settings_store.egress_policy().map_err(|e| e.to_string())?
+    };
+    let provider = escalation_provider("cloud")?;
+    agents::AgentBroker::bounded_default()
+        .preview(provider.as_ref(), &llm::EgressFirewall::new(policy), &task)
+        .map_err(|e| e.to_string())
+}
+
+/// Run one escalation as a durable job (#120): local runs immediately;
+/// cloud requires standing consent (settings) AND a per-payload grant whose
+/// hash matches this exact preview. The result is a staged proposal —
+/// accept/reject goes through record_agent_decision; the graph is never
+/// touched (R-INT-1/R-INT-3).
+#[tauri::command]
+async fn run_escalation(
+    gap_id: String,
+    mode: String,
+    approved_payload_hash: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<agents::AgentProposal, String> {
+    let job_id = {
+        let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let job = jobs
+            .enqueue(&format!("escalate:{gap_id}:{mode}"))
+            .map_err(|e| e.to_string())?;
+        jobs.set_status(job.id, "running")
+            .map_err(|e| e.to_string())?;
+        let running = jobs.get(job.id).map_err(|e| e.to_string())?;
+        emit_job(&app, &running);
+        job.id
+    };
+    let fail = |error: String| -> String {
+        report_failure(&app, &state, job_id, &error);
+        error
+    };
+
+    report_progress(&app, &state, job_id, "context", 20.0).map_err(&fail)?;
+    // Scoped so the span reader (non-trivial capture) drops before any await.
+    let (task, facts_before) = {
+        let (nodes, edges, reader) = graph_and_reader(&state).map_err(&fail)?;
+        let facts = nodes.len() + edges.len();
+        let task = escalation::assemble_task(
+            &nodes,
+            &edges,
+            &gap_id,
+            &format!("escalate:{gap_id}"),
+            &reader,
+        )
+        .map_err(&fail)?;
+        (task, facts)
+    };
+
+    report_progress(&app, &state, job_id, "model", 70.0).map_err(&fail)?;
+    let policy = {
+        let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+        settings_store.egress_policy().map_err(|e| e.to_string())?
+    };
+    let provider = escalation_provider(&mode).map_err(&fail)?;
+    let firewall = llm::EgressFirewall::new(policy);
+    let broker = agents::AgentBroker::bounded_default();
+    // A cloud run re-derives the preview and only proceeds when the user's
+    // approved hash matches this exact payload (one-action consent).
+    let consent = if mode == "cloud" {
+        let preview = broker
+            .preview(provider.as_ref(), &firewall, &task)
+            .map_err(|e| fail(e.to_string()))?;
+        let approved = approved_payload_hash
+            .ok_or_else(|| fail("cloud escalation requires an approved payload hash".into()))?;
+        if approved != preview.payload_hash {
+            return Err(fail(
+                "approved payload hash does not match the current payload — re-review the \
+                 preview before consenting"
+                    .into(),
+            ));
+        }
+        Some(llm::ConsentGrant::from_preview(&preview))
+    } else {
+        None
+    };
+    let payload_bytes = if consent.is_some() {
+        let preview = broker
+            .preview(provider.as_ref(), &firewall, &task)
+            .map_err(|e| fail(e.to_string()))?;
+        serde_json::to_vec(&preview.payload)
+            .map_err(|e| fail(e.to_string()))?
+            .len() as u64
+    } else {
+        0
+    };
+
+    let proposal = tauri::async_runtime::spawn_blocking(move || {
+        broker
+            .propose(provider.as_ref(), &firewall, &task, consent.as_ref())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|e| fail(e.to_string()))?
+    .map_err(&fail)?;
+
+    report_progress(&app, &state, job_id, "validate", 90.0).map_err(&fail)?;
+    if payload_bytes > 0 {
+        let mut settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+        settings_store
+            .record_egress(&proposal.provenance.extractor_id, payload_bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    // Propose-only, provably: the graph projection is unchanged.
+    {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let after = graph.all_nodes().map_err(|e| e.to_string())?.len()
+            + graph.all_edges().map_err(|e| e.to_string())?.len();
+        debug_assert_eq!(
+            facts_before, after,
+            "escalation must never mutate the graph"
+        );
+    }
+
+    let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+    let job = jobs
+        .finish(job_id, &[format!("proposal:{gap_id}")])
+        .map_err(|e| e.to_string())?;
+    emit_job(&app, &job);
+    if job.status != "done" {
+        return Err("cancelled".to_string());
+    }
+    Ok(proposal)
+}
+
 /// Notify the shell of a job transition (`job://changed`); the Jobs surface
 /// and the global progress bar stay live without polling (#117).
 fn emit_job(app: &tauri::AppHandle, job: &Job) {
@@ -1757,6 +2006,9 @@ fn main() {
             cloud_disclosure,
             ingest_history,
             extractor_coverage,
+            gap_strategies,
+            escalation_preview,
+            run_escalation,
             list_nodes,
             atlas_snapshot,
             read_evidence,
