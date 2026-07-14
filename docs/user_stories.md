@@ -117,9 +117,10 @@
 - **AC-0025** Given an agent proposal, when accepted/rejected, then the decision persists and re-applies on re-ingest.
 - **AC-0055** Given a tier whose provider is switched to cloud in Settings, when standing consent has not been granted, then the full disclosure (provider, pinned model id, endpoint, per-token pricing, lane caveats) is shown before consent is recordable and no cloud call is possible; if no disclosure is available, no consent affordance is offered at all.
 - **AC-0056** Given standing cloud consent, when it is revoked, the tier is disabled, or the tier's provider leaves cloud, then the derived egress policy and the status-bar egress summary immediately return to local-only.
+- **AC-0063** Given an open gap, when strategies are requested, then the report derives from real provenance (attempted tiers, stop reason, required evidence citations, closed candidate set) with local and cloud options carrying exact redacted-payload egress estimates, the cloud option fails closed without standing T3 consent; and when an escalation runs, local executes immediately while cloud requires both standing consent and a per-payload grant whose hash matches the exact preview, the run is a durable job, egress bytes are recorded, and the result is a staged proposal that never joins the graph (accept/reject flows through the existing decision records).
 - **Security:** Default-deny cloud egress; secret redaction on payloads.
 - **Performance:** —
-- **Trace:** M8 · `agents`, `llm`, `app`, `ui` · — · T-0023..0025,T-0055..0056
+- **Trace:** M8 · `agents`, `llm`, `app`, `ui` · — · T-0023..0025,T-0055..0056,T-0063
 
 ### US-0010 — Atlas graph canvas with confidence overlay
 - **Actor:** Engineer
