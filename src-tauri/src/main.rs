@@ -334,6 +334,14 @@ fn extract_tree_incremental(
             adapters_lang_ts::chrome_messaging::extract_dir(root, &ts_id)
                 .map_err(|e| e.to_string())?,
         );
+        // IndexedDB schema/store declarations and repository operations
+        // become the cited data model (DataEntity + READS/WRITES).
+        let idb =
+            adapters_lang_ts::indexeddb::extract_dir(root, &ts_id).map_err(|e| e.to_string())?;
+        layers.webext.nodes += idb.nodes.len() as u64;
+        layers.webext.edges += idb.edges.len() as u64;
+        extraction.nodes.extend(idb.nodes);
+        extraction.edges.extend(idb.edges);
     }
     if wants_server {
         let python_id = adapters_lang_python::SourceId { repo, commit };
@@ -2721,6 +2729,51 @@ resource "aws_sqs_queue" "orders" {
             node.label == "Gap"
                 && node.props["kind"] == "chrome-message"
                 && node.props["reason"] == "runtime-computed channel identity"
+        }));
+    }
+
+    #[test]
+    fn indexeddb_data_model_joins_the_graph() {
+        // US-0016/AC-0073: store declarations plus repository operations
+        // yield a cited DataEntity with READS/WRITES relations.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/schema.ts"),
+            "export const DataStore = { History: 'history' } as const;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/repo.ts"),
+            "import { DataStore } from './schema.js';\n\
+             export function save(tx: IDBTransaction, record: unknown) {\n\
+               tx.objectStore(DataStore.History).put(record);\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (extraction, _) = crate::extract_tree_with_summary(
+            dir.path(),
+            "local/ext",
+            "workdir",
+            &[],
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let entity = extraction
+            .nodes
+            .iter()
+            .find(|node| node.id == "data:local/ext@idb:history")
+            .expect("data entity");
+        assert_eq!(entity.props["prov"]["confidence_tier"], "Confirmed");
+        assert!(extraction.edges.iter().any(|edge| {
+            edge.label == "WRITES"
+                && edge.src == "sym:local/ext@src/repo.ts#save"
+                && edge.dst == entity.id
         }));
     }
 
