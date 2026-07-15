@@ -2415,6 +2415,7 @@ fn collect_ts_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::
 }
 
 pub mod chrome_messaging;
+pub(crate) mod const_resolution;
 pub mod webextension;
 
 #[cfg(test)]
