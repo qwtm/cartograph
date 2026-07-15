@@ -92,6 +92,21 @@ export function filterAtlasGraph(snapshot: AtlasSnapshot, layer: AtlasLayer): At
   };
 }
 
+/** Mono chip prefix per producing tier (handoff: `T0 TRIGGERS`, `GAP …`). */
+function tierCode(props: GraphNode['props'] | GraphEdge['props']): string {
+  if (confidence(props) === 'Gap') return 'GAP';
+  switch (props.prov?.tier) {
+    case 'Dynamic':
+      return 'T1';
+    case 'Semantic':
+      return 'T2';
+    case 'Agentic':
+      return 'T3';
+    default:
+      return 'T0';
+  }
+}
+
 function confidence(props: GraphNode['props'] | GraphEdge['props']): Tier {
   const tier = props.prov?.confidence_tier;
   return tier === 'Confirmed' ||
@@ -113,12 +128,21 @@ function displayName(node: GraphNode): string {
   return node.id;
 }
 
+/** Shape encodes kind, never color alone (handoff §Atlas): octagon with a
+ *  dashed red border = Gap, diamond = gateway/channel, rectangle = the
+ *  rest. Exported so the mapping itself is pinned by tests. */
+export function nodeShapeClass(node: GraphNode): 'atlas-gap' | 'kind-channel' | 'kind-box' {
+  if (node.label === 'Gap') return 'atlas-gap';
+  if (node.label === 'Channel' || node.label === 'Gateway') return 'kind-channel';
+  return 'kind-box';
+}
+
 function elementsFor(snapshot: AtlasSnapshot, overlay: boolean): cytoscape.ElementDefinition[] {
   const nodeElements = snapshot.nodes.map((node) => {
     const tier = confidence(node.props);
     return {
       data: { id: node.id, label: displayName(node), kind: node.label, tier },
-      classes: `${overlay ? `tier-${tier.toLowerCase()}` : 'tier-neutral'} ${node.label === 'Gap' ? 'atlas-gap' : ''}`,
+      classes: `${overlay ? `tier-${tier.toLowerCase()}` : 'tier-neutral'} ${nodeShapeClass(node)}`,
     };
   });
   const edgeElements = snapshot.edges.map((edge) => {
@@ -128,7 +152,8 @@ function elementsFor(snapshot: AtlasSnapshot, overlay: boolean): cytoscape.Eleme
         id: `${edge.src}\u0000${edge.label}\u0000${edge.dst}`,
         source: edge.src,
         target: edge.dst,
-        label: edge.label,
+        // The clickable mono chip: producing tier + relation.
+        label: `${tierCode(edge.props)} ${edge.label}`,
         tier,
       },
       classes: overlay ? `tier-${tier.toLowerCase()}` : 'tier-neutral',
@@ -196,8 +221,16 @@ const CY_STYLE: cytoscape.StylesheetStyle[] = [
     },
   },
   {
+    selector: '.kind-box',
+    style: { shape: 'round-rectangle' },
+  },
+  {
+    selector: '.kind-channel',
+    style: { shape: 'diamond' },
+  },
+  {
     selector: '.atlas-gap',
-    style: { shape: 'diamond', 'border-style': 'dashed', 'border-width': 3 },
+    style: { shape: 'octagon', 'border-style': 'dashed', 'border-width': 2 },
   },
   {
     selector: ':selected',
@@ -208,19 +241,25 @@ const CY_STYLE: cytoscape.StylesheetStyle[] = [
 export interface AtlasCanvasProps {
   snapshot: AtlasSnapshot;
   onSelect: (node: GraphNode) => void;
+  /** Edge tap → evidence drawer for the edge (same contract as nodes). */
+  onSelectEdge?: (edge: GraphEdge) => void;
+  /** The active layer drives the header scope chip (`Atlas · <layer>`). */
+  onLayerChange?: (label: string) => void;
 }
 
 /** Unified read-only graph with layer and confidence projections (US-0010). */
-export function AtlasCanvas({ snapshot, onSelect }: AtlasCanvasProps) {
+export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }: AtlasCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onSelectRef = useRef(onSelect);
+  const onSelectEdgeRef = useRef(onSelectEdge);
   const [layer, setLayer] = useState<AtlasLayer>('all');
   const [overlay, setOverlay] = useState(true);
   const visible = useMemo(() => filterAtlasGraph(snapshot, layer), [snapshot, layer]);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
-  }, [onSelect]);
+    onSelectEdgeRef.current = onSelectEdge;
+  }, [onSelect, onSelectEdge]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -234,9 +273,17 @@ export function AtlasCanvas({ snapshot, onSelect }: AtlasCanvasProps) {
       minZoom: 0.08,
       maxZoom: 4,
     });
+    const byEdgeId = new Map(
+      visible.edges.map((edge) => [`${edge.src}\u0000${edge.label}\u0000${edge.dst}`, edge]),
+    );
     cy.on('tap', 'node', (event) => {
       const node = byId.get(event.target.id());
       if (node) onSelectRef.current(node);
+    });
+    // Edges (and their label chips) are first-class evidence subjects.
+    cy.on('tap', 'edge', (event) => {
+      const edge = byEdgeId.get(event.target.id());
+      if (edge) onSelectEdgeRef.current?.(edge);
     });
     return () => cy.destroy();
   }, [visible, overlay]);
@@ -265,7 +312,10 @@ export function AtlasCanvas({ snapshot, onSelect }: AtlasCanvasProps) {
             type="button"
             className={layer === item.id ? 'active' : ''}
             aria-pressed={layer === item.id}
-            onClick={() => setLayer(item.id)}
+            onClick={() => {
+              setLayer(item.id);
+              onLayerChange?.(item.label);
+            }}
           >
             {item.label}
           </button>
@@ -306,6 +356,29 @@ export function AtlasCanvas({ snapshot, onSelect }: AtlasCanvasProps) {
               </button>
             ))}
             {visible.nodes.length > 24 && <span className="muted">+{visible.nodes.length - 24} more on canvas</span>}
+          </div>
+        </div>
+      )}
+
+      {visible.edges.length > 0 && onSelectEdge && (
+        <div className="atlas-entity-index" aria-label="Visible relations">
+          <span className="muted">Visible relations</span>
+          <div>
+            {visible.edges.slice(0, 24).map((edge) => (
+              <button
+                key={`${edge.src} ${edge.label} ${edge.dst}`}
+                type="button"
+                className="atlas-edge-chip"
+                aria-label={`${tierCode(edge.props)} ${edge.label}: ${edge.src} to ${edge.dst}`}
+                title={`${edge.src} → ${edge.dst}`}
+                onClick={() => onSelectEdge(edge)}
+              >
+                {tierCode(edge.props)} {edge.label}
+              </button>
+            ))}
+            {visible.edges.length > 24 && (
+              <span className="muted">+{visible.edges.length - 24} more on canvas</span>
+            )}
           </div>
         </div>
       )}
