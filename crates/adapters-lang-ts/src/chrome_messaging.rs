@@ -2,18 +2,25 @@
 //! producer/consumer sites for `chrome.runtime`/`chrome.tabs` messaging.
 //!
 //! Producers are `chrome.runtime.sendMessage(msg)` / `chrome.tabs.sendMessage(tab, msg)`
-//! call sites — the receiver is the platform global, so the guard is the
-//! exact callee text plus a shadow check, mirroring the `fetch` rule.
+//! call sites. The receiver must be the platform global: any local binding
+//! named `chrome` — variable, import (named/default/namespace), parameter,
+//! or function declaration — shadows the API and fails the whole file
+//! closed, mirroring the `fetch` rule (#149 review).
+//!
 //! Message identity is the `type` property of the message object, resolved
 //! deterministically through (a) string literals, (b) member access into a
-//! repo-wide const object of string literals (`MessageType.Ping`), or (c) a
-//! one-hop call to a creator function whose returned object literal carries
-//! a resolvable `type`. Anything else stays `Computed` and the events crate
-//! records an explicit Gap (AC-0012, R-INT-4) — never a guess.
+//! const object of string literals (`MessageType.Ping`) whose binding is
+//! **proven** — declared in the same file or imported through a relative
+//! specifier resolving to the repo file that exports it — or (c) a one-hop
+//! call to a binding-proven creator function whose returned object literal
+//! carries a resolvable `type`. Unproven bindings (bare-package imports,
+//! parameters, same-name coincidences elsewhere in the repo) stay
+//! `Computed`, and the events crate records an explicit Gap (AC-0012,
+//! R-INT-4) — never a guess.
 //!
 //! Consumers are explicit handler registrations: object-literal dispatch
 //! tables whose computed keys (`[MessageType.LoadAlbums]: handler`) resolve
-//! through the same const index, gated on the repo actually registering a
+//! through the same proof, gated on the repo actually registering a
 //! `chrome.runtime.onMessage.addListener`. A repo whose only consumer
 //! evidence is the listener itself gets a single `Computed` site — the
 //! dynamic dispatch surface is recorded, not invented.
@@ -24,19 +31,20 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node as TsNode, Parser, Query, QueryCursor};
 
+use crate::const_resolution::{ConstIndex, collect_const_objects, collect_imports};
 use crate::{ExtractError, FileCx, SourceId, enclosing_symbol, literal_string, object_entries};
 
 /// Channel kind for the events registry (`chan:chrome-message:<type>`).
 pub const CHANNEL_KIND: &str = "chrome-message";
 
-/// A message identity before repo-wide resolution.
+/// A message identity before binding-proven resolution.
 #[derive(Debug, Clone)]
 enum Pending {
     /// A string literal — already resolved.
     Literal(String),
-    /// `Object.Member` — resolve against the repo-wide const-string index.
+    /// `Object.Member` — resolve through the proven const index.
     Member(String),
-    /// `createX(…)` — resolve through the creator's returned `type`.
+    /// `createX(…)` — resolve through a proven creator's returned `type`.
     Creator(String),
     /// Not statically visible; carries the raw source text.
     Computed(String),
@@ -53,45 +61,19 @@ struct PendingSite {
 
 #[derive(Default)]
 struct RepoIndex {
-    /// `Object.Member` → literal; `None` marks a cross-file conflict, which
-    /// deterministically refuses to resolve rather than picking a winner.
-    const_members: BTreeMap<String, Option<String>>,
-    /// Creator function name → the `type` its returned object declares.
-    creators: BTreeMap<String, Option<Pending>>,
+    consts: ConstIndex,
+    /// (file, creator name) → the `type` its returned object declares.
+    creator_defs: BTreeMap<(String, String), Pending>,
+    /// (file, creator name) — the creator is exported from that file.
+    exported_creators: BTreeMap<(String, String), ()>,
     sites: Vec<PendingSite>,
-    /// Dispatch-table keys awaiting the listener gate + const resolution.
+    /// Dispatch-table keys awaiting the listener gate + proof.
     dispatch_keys: Vec<PendingSite>,
     listeners: Vec<PendingSite>,
 }
 
-fn insert_unique<T: Clone + PartialEq>(
-    map: &mut BTreeMap<String, Option<T>>,
-    key: String,
-    value: T,
-) {
-    match map.get(&key) {
-        None => {
-            map.insert(key, Some(value));
-        }
-        Some(Some(existing)) if *existing == value => {}
-        _ => {
-            map.insert(key, None); // conflict: refuse to resolve
-        }
-    }
-}
-
-impl PartialEq for Pending {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Pending::Literal(a), Pending::Literal(b))
-            | (Pending::Member(a), Pending::Member(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
 /// Unwrap `as const` / `satisfies` wrappers down to the inner expression.
-fn unwrap_assertions<'t>(node: TsNode<'t>) -> TsNode<'t> {
+pub(crate) fn unwrap_assertions<'t>(node: TsNode<'t>) -> TsNode<'t> {
     let mut current = node;
     while matches!(current.kind(), "as_expression" | "satisfies_expression") {
         let Some(inner) = current.named_child(0) else {
@@ -137,23 +119,41 @@ fn classify_message(cx: &FileCx, arg: TsNode) -> Pending {
     }
 }
 
-fn resolve(index: &RepoIndex, pending: &Pending) -> IdentityExpr {
-    match pending {
-        Pending::Literal(value) => IdentityExpr::Literal(value.clone()),
-        Pending::Member(member) => match index.const_members.get(member) {
-            Some(Some(value)) => IdentityExpr::Literal(value.clone()),
-            _ => IdentityExpr::Computed(member.clone()),
-        },
-        Pending::Creator(name) => match index.creators.get(name) {
-            Some(Some(inner @ (Pending::Literal(_) | Pending::Member(_)))) => {
-                match resolve(index, inner) {
+impl RepoIndex {
+    /// Resolve a pending identity as seen from `file`, binding-proven.
+    fn resolve(&self, file: &str, pending: &Pending) -> IdentityExpr {
+        match pending {
+            Pending::Literal(value) => IdentityExpr::Literal(value.clone()),
+            Pending::Member(member) => match self.consts.resolve_member(file, member) {
+                Some(value) => IdentityExpr::Literal(value),
+                None => IdentityExpr::Computed(member.clone()),
+            },
+            Pending::Creator(name) => {
+                // Same-file creator, else an import-proven one.
+                let key = (file.to_string(), name.clone());
+                let (def_file, def) = if let Some(def) = self.creator_defs.get(&key) {
+                    (file.to_string(), def)
+                } else if let Some((target, original)) =
+                    self.consts.prove_import(file, name, |candidate, original| {
+                        self.exported_creators
+                            .contains_key(&(candidate.to_string(), original.to_string()))
+                    })
+                {
+                    match self.creator_defs.get(&(target.clone(), original)) {
+                        Some(def) => (target, def),
+                        None => return IdentityExpr::Computed(format!("{name}(…)")),
+                    }
+                } else {
+                    return IdentityExpr::Computed(format!("{name}(…)"));
+                };
+                // The creator's own `type` resolves in *its* file context.
+                match self.resolve(&def_file, &def.clone()) {
                     IdentityExpr::Literal(value) => IdentityExpr::Literal(value),
                     _ => IdentityExpr::Computed(format!("{name}(…)")),
                 }
             }
-            _ => IdentityExpr::Computed(format!("{name}(…)")),
-        },
-        Pending::Computed(raw) => IdentityExpr::Computed(raw.clone()),
+            Pending::Computed(raw) => IdentityExpr::Computed(raw.clone()),
+        }
     }
 }
 
@@ -177,86 +177,98 @@ fn extract_file(
     let root = tree.root_node();
     let cx = FileCx { source, path, id };
 
-    // A locally bound `chrome` is application code, not the platform API —
-    // same fail-closed rule as the shadowed-`fetch` guard.
-    let q_decls = Query::new(
+    let mut chrome_shadowed = collect_imports(&cx, root, &language, &mut index.consts);
+    collect_const_objects(&cx, root, &language, &mut index.consts);
+
+    // Any other local binding named `chrome` — variable, parameter, or
+    // function — shadows the platform API too (#149 review, fail closed).
+    let q_bindings = Query::new(
         &language,
         r#"
-        (variable_declarator name: (identifier) @name value: (_) @value)
-        (import_specifier name: (identifier) @import)
-        (import_clause (identifier) @import)
+        (variable_declarator name: (identifier) @binding)
+        (required_parameter pattern: (identifier) @binding)
+        (optional_parameter pattern: (identifier) @binding)
+        (arrow_function parameter: (identifier) @binding)
+        (function_declaration name: (identifier) @binding)
         "#,
     )
     .expect("static query");
-    let mut chrome_shadowed = false;
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&q_decls, root, source);
+    let mut matches = cursor.matches(&q_bindings, root, source);
     while let Some(m) = matches.next() {
-        let (mut name, mut value) = (None, None);
         for c in m.captures {
-            match q_decls.capture_names()[c.index as usize] {
-                "name" => name = Some(c.node),
-                "value" => value = Some(c.node),
-                "import" if cx.text(&c.node) == "chrome" => chrome_shadowed = true,
+            if cx.text(&c.node) == "chrome" {
+                chrome_shadowed = true;
+            }
+        }
+    }
+
+    // Arrow-const creators: `const createPing = () => ({ type: … })`.
+    let q_arrow_creators = Query::new(
+        &language,
+        r#"(variable_declarator name: (identifier) @name value: (arrow_function) @arrow) @decl"#,
+    )
+    .expect("static query");
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&q_arrow_creators, root, source);
+    while let Some(m) = matches.next() {
+        let (mut name, mut arrow, mut decl) = (None, None, None);
+        for c in m.captures {
+            match q_arrow_creators.capture_names()[c.index as usize] {
+                "name" => name = Some(cx.text(&c.node).to_string()),
+                "arrow" => arrow = Some(c.node),
+                "decl" => decl = Some(c.node),
                 _ => {}
             }
         }
-        let (Some(name), Some(value)) = (name, value) else {
+        let (Some(name), Some(arrow), Some(decl)) = (name, arrow, decl) else {
             continue;
         };
-        let name_text = cx.text(&name).to_string();
-        if name_text == "chrome" {
-            chrome_shadowed = true;
-        }
-        // Const-string object maps feed the repo-wide member index.
-        let value = unwrap_assertions(value);
-        if value.kind() == "object" {
-            for (key, entry) in object_entries(&cx, value) {
-                if let Some(lit) = literal_string(&cx, entry) {
-                    insert_unique(&mut index.const_members, format!("{name_text}.{key}"), lit);
-                }
-            }
-        }
-        // Arrow-const creators: `const createPing = () => ({ type: … })`.
-        if value.kind() == "arrow_function"
-            && let Some(body) = value.child_by_field_name("body")
-        {
+        if let Some(body) = arrow.child_by_field_name("body") {
             let body = if body.kind() == "parenthesized_expression" {
                 body.named_child(0).unwrap_or(body)
             } else {
                 body
             };
-            record_creator(&cx, index, &name_text, body);
+            record_creator(
+                &cx,
+                index,
+                &name,
+                body,
+                crate::const_resolution::is_exported(decl),
+            );
         }
     }
 
     // Function-declaration creators: `function createPing() { return { type } }`.
     let q_funcs = Query::new(
         &language,
-        r#"(function_declaration name: (identifier) @name body: (statement_block) @body)"#,
+        r#"(function_declaration name: (identifier) @name body: (statement_block) @body) @decl"#,
     )
     .expect("static query");
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&q_funcs, root, source);
     while let Some(m) = matches.next() {
-        let (mut name, mut body) = (None, None);
+        let (mut name, mut body, mut decl) = (None, None, None);
         for c in m.captures {
             match q_funcs.capture_names()[c.index as usize] {
                 "name" => name = Some(cx.text(&c.node).to_string()),
                 "body" => body = Some(c.node),
+                "decl" => decl = Some(c.node),
                 _ => {}
             }
         }
-        let (Some(name), Some(body)) = (name, body) else {
+        let (Some(name), Some(body), Some(decl)) = (name, body, decl) else {
             continue;
         };
+        let exported = crate::const_resolution::is_exported(decl);
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
             if node.kind() == "return_statement" {
                 if let Some(value) = node.named_child(0) {
                     let value = unwrap_assertions(value);
                     if value.kind() == "object" {
-                        record_creator(&cx, index, &name, value);
+                        record_creator(&cx, index, &name, value, exported);
                     }
                 }
                 continue;
@@ -270,7 +282,7 @@ fn extract_file(
         }
     }
 
-    // Producer, listener, and dispatch-table sites.
+    // Producer and listener sites.
     let q_calls = Query::new(
         &language,
         r#"(call_expression function: (member_expression) @callee arguments: (arguments) @args) @call"#,
@@ -373,10 +385,14 @@ fn extract_file(
     Ok(())
 }
 
-fn record_creator(cx: &FileCx, index: &mut RepoIndex, name: &str, object: TsNode) {
+fn record_creator(cx: &FileCx, index: &mut RepoIndex, name: &str, object: TsNode, exported: bool) {
     let pending = type_of_object(cx, object);
     if matches!(pending, Pending::Literal(_) | Pending::Member(_)) {
-        insert_unique(&mut index.creators, name.to_string(), pending);
+        let key = (cx.path.to_string(), name.to_string());
+        if exported {
+            index.exported_creators.insert(key.clone(), ());
+        }
+        index.creator_defs.insert(key, pending);
     }
 }
 
@@ -408,7 +424,7 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<EventSite>, Extract
     let mut out = Vec::new();
     let sites = std::mem::take(&mut index.sites);
     for pending in sites {
-        let identity = resolve(&index, &pending.identity);
+        let identity = index.resolve(&pending.path.clone(), &pending.identity);
         out.push(site(pending, identity));
     }
     // Consumer facts need a real runtime listener to exist — dispatch
@@ -417,20 +433,20 @@ pub fn extract_dir(root: &Path, id: &SourceId) -> Result<Vec<EventSite>, Extract
         let keys = std::mem::take(&mut index.dispatch_keys);
         let mut resolved_any = false;
         for pending in keys {
-            let identity = resolve(&index, &pending.identity);
+            let identity = index.resolve(&pending.path.clone(), &pending.identity);
             if let IdentityExpr::Literal(_) = identity {
                 resolved_any = true;
                 out.push(site(pending, identity));
             }
             // Unresolved computed keys are not messaging evidence — a
-            // dispatch table only counts through the const-map proof.
+            // dispatch table only counts through the binding proof.
         }
         if !resolved_any {
             // The listener is the only consumer evidence: record the
             // dynamic dispatch surface explicitly (Gap at T0).
             let listeners = std::mem::take(&mut index.listeners);
             for pending in listeners {
-                let identity = resolve(&index, &pending.identity);
+                let identity = index.resolve(&pending.path.clone(), &pending.identity);
                 out.push(site(pending, identity));
             }
         }
@@ -584,20 +600,42 @@ mod tests {
     }
 
     #[test]
-    fn shadowed_chrome_and_conflicting_const_maps_fail_closed() {
-        // A local `chrome` binding is application code, not the platform.
-        let shadowed = extract(&[(
-            "src/fake.ts",
-            concat!(
-                "const chrome = { runtime: { sendMessage: (m: unknown) => m } };\n",
-                "chrome.runtime.sendMessage({ type: 'ext.fake' });\n",
+    fn every_local_chrome_binding_shadows_the_platform_api() {
+        // #149 review: variables, parameters, function declarations, and
+        // namespace imports named `chrome` all fail the file closed.
+        for (name, source) in [
+            (
+                "variable",
+                "const chrome = { runtime: { sendMessage: (m: unknown) => m } };\n\
+                 chrome.runtime.sendMessage({ type: 'ext.fake' });\n",
             ),
-        )]);
-        assert!(shadowed.is_empty(), "shadowed chrome must not match");
+            (
+                "parameter",
+                "export function send(chrome: { runtime: { sendMessage(m: unknown): void } }) {\n\
+                 \x20 chrome.runtime.sendMessage({ type: 'ext.fake' });\n\
+                 }\n",
+            ),
+            (
+                "namespace import",
+                "import * as chrome from './shim.js';\n\
+                 chrome.runtime.sendMessage({ type: 'ext.fake' });\n",
+            ),
+            (
+                "arrow parameter",
+                "export const send = (chrome: { runtime: { sendMessage(m: unknown): void } }) =>\n\
+                 \x20 chrome.runtime.sendMessage({ type: 'ext.fake' });\n",
+            ),
+        ] {
+            let sites = extract(&[("src/fake.ts", source)]);
+            assert!(sites.is_empty(), "{name} shadow must not match: {sites:?}");
+        }
+    }
 
-        // Two exported maps with the same name and different values: the
-        // member refuses to resolve rather than picking a winner.
-        let conflicted = extract(&[
+    #[test]
+    fn unproven_bindings_stay_computed_and_proof_picks_the_right_map() {
+        // Two same-named exported maps: the import proof selects the one the
+        // file actually imports — never a repo-wide name coincidence.
+        let sites = extract(&[
             (
                 "a/protocol.ts",
                 "export const MessageType = { Ping: 'a.ping' };\n",
@@ -614,10 +652,75 @@ mod tests {
                 ),
             ),
         ]);
-        assert_eq!(conflicted.len(), 1);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].identity, IdentityExpr::Literal("a.ping".into()));
+
+        // A bare-package import cannot be proven inside the repo: Computed,
+        // even though an unrelated same-named map exists elsewhere.
+        let unproven = extract(&[
+            (
+                "other/protocol.ts",
+                "export const MessageType = { Ping: 'other.ping' };\n",
+            ),
+            (
+                "src/send.ts",
+                concat!(
+                    "import { MessageType } from 'some-lib';\n",
+                    "chrome.runtime.sendMessage({ type: MessageType.Ping });\n",
+                ),
+            ),
+        ]);
+        assert_eq!(unproven.len(), 1);
         assert!(matches!(
-            &conflicted[0].identity,
+            &unproven[0].identity,
             IdentityExpr::Computed(raw) if raw == "MessageType.Ping"
+        ));
+
+        // Aliased named imports keep the proof through the original name.
+        let aliased = extract(&[
+            (
+                "src/protocol.ts",
+                "export const MessageType = { Ping: 'ext.ping' };\n",
+            ),
+            (
+                "src/send.ts",
+                concat!(
+                    "import { MessageType as MT } from './protocol.js';\n",
+                    "chrome.runtime.sendMessage({ type: MT.Ping });\n",
+                ),
+            ),
+        ]);
+        assert_eq!(aliased.len(), 1);
+        assert_eq!(
+            aliased[0].identity,
+            IdentityExpr::Literal("ext.ping".into())
+        );
+
+        // An imported creator resolves only through its own export proof.
+        let creator_unproven = extract(&[
+            (
+                "other/messages.ts",
+                concat!(
+                    "export const MessageType = { Toggle: 'other.toggle' };\n",
+                    "export function createToggleMessage() {\n",
+                    "  return { type: MessageType.Toggle };\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "src/worker.ts",
+                concat!(
+                    "import { createToggleMessage } from 'some-lib';\n",
+                    "async function toggle(tabId: number) {\n",
+                    "  await chrome.tabs.sendMessage(tabId, createToggleMessage());\n",
+                    "}\n",
+                ),
+            ),
+        ]);
+        assert_eq!(creator_unproven.len(), 1);
+        assert!(matches!(
+            &creator_unproven[0].identity,
+            IdentityExpr::Computed(raw) if raw == "createToggleMessage(…)"
         ));
     }
 }
