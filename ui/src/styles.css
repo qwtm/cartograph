@@ -3321,3 +3321,21 @@ button.register-row:hover {
 .proposal-card p {
   margin: 0.2rem 0;
 }
+
+/* ── Atlas edge chips (#106): mono tier+relation, clickable like nodes ── */
+
+.atlas-edge-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--control);
+  color: var(--text-muted);
+}
+
+.atlas-edge-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  filter: none;
+}

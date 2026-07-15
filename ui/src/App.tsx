@@ -126,6 +126,7 @@ export default function App() {
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
+  const [atlasLayer, setAtlasLayer] = useState('All layers');
 
   useEffect(() => {
     void refresh();
@@ -181,7 +182,9 @@ export default function App() {
     ingestBusy || specBusy || clearBusy || jobs.some((job) => job.status === 'running');
   const scope: Scope = selected
     ? { kind: 'trail', label: 'Single evidence trail' }
-    : { kind: 'system', label: 'Whole system' };
+    : view === 'atlas' && atlasLayer !== 'All layers'
+      ? { kind: 'layer', label: `Atlas · ${atlasLayer}` }
+      : { kind: 'system', label: 'Whole system' };
   const systemName = ingestSummary ? 'Ingested system' : null;
   const status = ingestBusy
     ? 'Ingesting…'
@@ -226,7 +229,20 @@ export default function App() {
       case 'atlas':
         return (
           <Suspense fallback={<section className="atlas-card">Loading Atlas graph…</section>}>
-            <AtlasCanvas snapshot={atlas} onSelect={(node) => void select(node)} />
+            <AtlasCanvas
+              snapshot={atlas}
+              onSelect={(node) => void select(node)}
+              onSelectEdge={(edge) =>
+                // Edges are evidence subjects too: the drawer reads the
+                // edge's own provenance via a synthetic subject.
+                void select({
+                  id: `${edge.src} ${edge.label} ${edge.dst}`,
+                  label: edge.label,
+                  props: edge.props,
+                })
+              }
+              onLayerChange={setAtlasLayer}
+            />
           </Suspense>
         );
       case 'flows':

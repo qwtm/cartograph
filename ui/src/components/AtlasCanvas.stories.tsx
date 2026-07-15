@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import type { AtlasSnapshot, GraphNode, Provenance, Tier } from '../store';
-import { AtlasCanvas } from './AtlasCanvas';
+import { AtlasCanvas, nodeShapeClass } from './AtlasCanvas';
 
 function prov(confidence_tier: Tier, path: string): Provenance {
   return {
@@ -89,7 +89,7 @@ const atlasFixture: AtlasSnapshot = {
 const meta = {
   title: 'Atlas/AtlasCanvas',
   component: AtlasCanvas,
-  args: { snapshot: atlasFixture, onSelect: fn() },
+  args: { snapshot: atlasFixture, onSelect: fn(), onSelectEdge: fn(), onLayerChange: fn() },
 } satisfies Meta<typeof AtlasCanvas>;
 
 export default meta;
@@ -129,6 +129,51 @@ export const NodeSelection: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole('button', { name: 'POST /orders' }));
     await expect(args.onSelect).toHaveBeenCalledWith(atlasNodes[2]);
+  },
+};
+
+export const ShapeEncodesKindNeverColorAlone: Story = {
+  // #106: octagon dashed red = Gap (no longer colliding with the gateway
+  // diamond), diamond = channel/gateway, rectangle = everything else.
+  play: async ({ canvasElement }) => {
+    await expect(nodeShapeClass(atlasNodes[4])).toBe('atlas-gap');
+    await expect(nodeShapeClass(atlasNodes[1])).toBe('kind-channel');
+    await expect(
+      nodeShapeClass({ id: 'gw:api', label: 'Gateway', props: {} }),
+    ).toBe('kind-channel');
+    await expect(nodeShapeClass(atlasNodes[2])).toBe('kind-box');
+    // The canvas itself rendered (shape classes feed Cytoscape styles).
+    await expect(
+      within(canvasElement).getByTestId('atlas-canvas'),
+    ).toBeInTheDocument();
+  },
+};
+
+export const EdgeChipsOpenEdgeEvidence: Story = {
+  // #106: every edge carries a mono tier+relation chip and is clickable —
+  // the chip names the producing tier, GAP edges say so.
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const relations = within(canvas.getByLabelText('Visible relations'));
+    await expect(relations.getByText('T0 BACKS')).toBeInTheDocument();
+    await expect(relations.getByText('T2 PUBLISHES')).toBeInTheDocument();
+    await expect(relations.getByText('T3 FETCHES')).toBeInTheDocument();
+    await expect(relations.getByText('GAP CALLS')).toBeInTheDocument();
+
+    await userEvent.click(relations.getByText('GAP CALLS'));
+    await expect(args.onSelectEdge).toHaveBeenCalledWith(atlasFixture.edges[3]);
+  },
+};
+
+export const LayerDrivesScopeChip: Story = {
+  // #106: the layer filter reports its label so the header scope chip can
+  // read `Atlas · <layer>`.
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole('button', { name: 'Events' }));
+    await expect(args.onLayerChange).toHaveBeenCalledWith('Events');
+    await userEvent.click(canvas.getByRole('button', { name: 'All layers' }));
+    await expect(args.onLayerChange).toHaveBeenCalledWith('All layers');
   },
 };
 

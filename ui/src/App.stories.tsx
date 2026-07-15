@@ -185,7 +185,24 @@ function installFakeCore() {
         return [];
       }
       case 'atlas_snapshot':
-        return { nodes: [FAKE_ENDPOINT], edges: [] };
+        return {
+          nodes: [
+            FAKE_ENDPOINT,
+            {
+              id: 'sym:app.ts#listUsers',
+              label: 'Symbol',
+              props: { name: 'listUsers', prov: FAKE_PROVENANCE },
+            },
+          ],
+          edges: [
+            {
+              src: FAKE_ENDPOINT.id,
+              dst: 'sym:app.ts#listUsers',
+              label: 'HANDLES',
+              props: { prov: FAKE_PROVENANCE },
+            },
+          ],
+        };
       case 'read_evidence':
         return { text: FAKE_SOURCE, window_start: 0, truncated: false };
       case 'export_flows':
@@ -813,7 +830,7 @@ export const AtlasNodeToEvidence: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Atlas' }));
     await waitFor(() =>
       expect(within(canvas.getByLabelText('Confidence legend')).getByRole('status')).toHaveTextContent(
-        '1 nodes · 0 edges',
+        '2 nodes · 1 edges',
       ),
     );
     await userEvent.click(canvas.getByRole('button', { name: /^GET \/users$/ }));
@@ -824,6 +841,18 @@ export const AtlasNodeToEvidence: Story = {
     const evidence = within(canvasElement.querySelector('.evidence-panel') as HTMLElement);
     await expect(evidence.getByText(/src\/app\.ts/)).toBeInTheDocument();
     await expect(evidence.getByText(/workdir/)).toBeInTheDocument();
+
+    // #106: with the drawer open, ONE click on an edge chip re-selects —
+    // the overlay never swallows it (handoff interaction #1) — and the
+    // drawer now shows the edge's own evidence.
+    await userEvent.click(canvas.getByRole('button', { name: 'T0 HANDLES: ep:GET:/users to sym:app.ts#listUsers' }));
+    await waitFor(() =>
+      expect(
+        within(canvasElement.querySelector('.evidence-panel') as HTMLElement).getByText(
+          /ep:GET:\/users HANDLES sym:app\.ts#listUsers/,
+        ),
+      ).toBeInTheDocument(),
+    );
   },
 };
 

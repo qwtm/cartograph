@@ -130,9 +130,10 @@
 - **AC-0027** Given the confidence overlay, when active, then nodes/edges are colored by tier and Gaps are flagged.
 - **AC-0028** Given a node, when selected, then the evidence panel shows file/span/commit with read-only jump-to-source.
 - **AC-0062** Given the evidence drawer, when open, then it is resizable (320↔560px), its overlay never swallows clicks outside the panel, Esc closes it, the source view carries true file line numbers (windowed files report their real starting line) and the full span range including end line:col, non-Confirmed facts show a why-strip plus a collapsible why-this-tier explanation, the provenance table renders the complete 64-hex content hash with a copy affordance whose payload equals the displayed value, supporting evidence spans are navigable, a Gap offers the Resolution Strategy CTA, and the footer states the R-INT-1 integrity rule.
+- **AC-0064** Given the Atlas canvas, when it renders, then node shape encodes kind independently of color (octagon with a dashed red border = Gap, diamond = gateway/channel, rounded rectangle = everything else), every edge carries a clickable mono tier+relation chip (`T0 HANDLES`, `GAP …`) that opens the evidence drawer for the edge exactly like a node, the layer filter drives the header scope chip (`Atlas · <layer>`), and a single click selects a node or edge even while the drawer is open.
 - **Security:** Source view is read-only (NG1).
 - **Performance:** Canvas remains interactive at 10k+ nodes (Cytoscape.js).
-- **Trace:** M9 · `core-graph`, `app`, `ui` · — · T-0026..0028,T-0062
+- **Trace:** M9 · `core-graph`, `app`, `ui` · — · T-0026..0028,T-0062,T-0064
 
 ### US-0011 — Flow Inspector with explicit gaps
 - **Actor:** Engineer
