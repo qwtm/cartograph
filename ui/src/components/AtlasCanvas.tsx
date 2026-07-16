@@ -613,6 +613,10 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
                 onClick={() => {
                   setSelectedId(node.id);
                   onSelect(node);
+                  // Hand the keyboard to the canvas so the announced
+                  // "press Enter to focus" path works immediately —
+                  // Enter on the button would only re-select (#190 review).
+                  containerRef.current?.focus();
                 }}
               >
                 {displayName(node)}

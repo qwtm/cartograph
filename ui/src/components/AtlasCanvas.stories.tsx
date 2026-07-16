@@ -169,7 +169,9 @@ export const FocusIsKeyboardOperableAndAnnounced: Story = {
       canvas.getByText(/POST \/orders selected — press Enter to focus/),
     ).toBeInTheDocument();
 
-    (canvasElement.querySelector('.atlas-cytoscape') as HTMLElement).focus();
+    // Selection hands the keyboard to the canvas (#190 review): the next
+    // Enter focuses immediately — no manual tabbing to the canvas needed.
+    await expect(document.activeElement?.className).toContain('atlas-cytoscape');
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(canvas.getByRole('status')).toHaveTextContent('4 nodes · 3 edges'));
     await expect(
