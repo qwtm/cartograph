@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { HelpTip } from './HelpTip';
 import type { AnchorProbe, Flow, FlowHop, Tier } from '../store';
 
 export type FlowExportMode = 'verified-only' | 'best-effort';
@@ -312,6 +313,7 @@ export function FlowsCard({
         </div>
         <div className="flow-inspector-controls">
           <div className="flow-mode-toggle" aria-label="Flow export mode">
+            <HelpTip topic="projection" />
             {(['verified-only', 'best-effort'] as const).map((item) => (
               <button
                 key={item}

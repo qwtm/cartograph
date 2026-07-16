@@ -144,6 +144,14 @@ export const ThreeLanesNeverConflate: Story = {
     // Lane headers reconcile with the tally — the raw register's flow-hop
     // restatement (a 4th assertion) is filtered out, not double-counted.
     await expect(canvas.getByText('System gaps · 3')).toBeInTheDocument();
+    // #164: each register term explains itself in place.
+    await expect(canvas.getByRole('button', { name: 'What is system gap?' })).toBeInTheDocument();
+    await expect(
+      canvas.getByRole('button', { name: 'What is unsupported pattern?' }),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByRole('button', { name: 'What is no-evidence question?' }),
+    ).toBeInTheDocument();
     await expect(canvas.queryByText(/capture → sync \(unresolved\)/)).not.toBeInTheDocument();
     await expect(canvas.getByText('Unsupported patterns · 2')).toBeInTheDocument();
     await expect(canvas.getByText('No evidence found · 1')).toBeInTheDocument();

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { GROUP_THRESHOLD, groupGapClasses, nextTier, type GapClass } from '../gapClasses';
+import { HelpTip } from './HelpTip';
 import type { FindingsSummary, RegisterFinding, SpecAssertion } from '../store';
 
 export interface GapsDriftSurfaceProps {
@@ -185,6 +186,7 @@ export function GapsDriftSurface({
                 link_off
               </span>
               System gaps · {gapFindings.length}
+              <HelpTip topic="gap" />
               {gapClasses && ` — ${gapClasses.length} ${gapClasses.length === 1 ? 'cause' : 'causes'}`}
             </h3>
             <p className="muted">
@@ -207,6 +209,7 @@ export function GapsDriftSurface({
                 block
               </span>
               Unsupported patterns · {unsupported.length}
+              <HelpTip topic="unsupported" />
             </h3>
             <p className="muted">
               Constructs no adapter covers yet — a tool limitation, not a System Gap. Reported
@@ -234,6 +237,7 @@ export function GapsDriftSurface({
                 search_off
               </span>
               No evidence found · {noEvidence.length}
+              <HelpTip topic="noEvidence" />
             </h3>
             <p className="muted">
               Questions recovery looked for and could not answer — absence is stated, not

@@ -251,6 +251,53 @@ body {
   letter-spacing: normal;
 }
 
+/* #164: in-place micro-help — a keyboard-reachable "?" with a popover note. */
+.help-tip {
+  display: inline-block;
+  margin-left: 0.35rem;
+  position: relative;
+}
+
+.help-tip::before {
+  content: none;
+}
+
+.help-tip-trigger {
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  cursor: help;
+  font-size: 0.68rem;
+  font-weight: 700;
+  height: 1.1rem;
+  line-height: 1;
+  padding: 0;
+  text-transform: none;
+  width: 1.1rem;
+}
+
+.help-tip-note {
+  background: var(--surface, #1c1c1c);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 40%);
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 400;
+  left: 0;
+  letter-spacing: normal;
+  line-height: 1.45;
+  max-width: 26rem;
+  min-width: 16rem;
+  padding: 0.6rem 0.8rem;
+  position: absolute;
+  text-transform: none;
+  top: calc(100% + 0.35rem);
+  white-space: normal;
+  z-index: 30;
+}
+
 /* #160: focus-path breadcrumb — Enter roots the selection, Esc backs out. */
 .atlas-focus-path {
   align-items: center;

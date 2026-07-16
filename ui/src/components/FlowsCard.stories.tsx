@@ -228,6 +228,10 @@ export const SequenceAndTriggerSelection: Story = {
     await expect(canvas.getByText('VERIFIED')).toHaveClass('tier-confirmed');
     await expect(canvas.getByText(/Flow score 1\.00/)).toBeInTheDocument();
     await expect(canvas.getByRole('status')).toHaveTextContent('2 of 2 hops shown');
+    // #164: the projection toggle explains verified-only vs best-effort.
+    await expect(
+      canvas.getByRole('button', { name: 'What is verified-only vs best-effort?' }),
+    ).toBeInTheDocument();
     await expect(canvas.getByLabelText('Flow sequence')).toHaveTextContent('createOrder');
 
     await userEvent.selectOptions(canvas.getByLabelText('Trigger source'), PARTIAL.trigger);
