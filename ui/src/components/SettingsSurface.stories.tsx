@@ -1,7 +1,39 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within } from 'storybook/test';
 import { SettingsSurface } from './SettingsSurface';
-import type { CloudDisclosure, TierSettings } from '../store';
+import type { AdapterInventory, CloudDisclosure, TierSettings } from '../store';
+
+/** Mirrors `ingest::preflight::INSTALLED_ADAPTERS`/`PLANNED_ADAPTERS`. */
+const INVENTORY: AdapterInventory = {
+  installed: [
+    {
+      id: 't0.adapter-ts',
+      language: 'TypeScript/JavaScript',
+      extensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'],
+      covers: 'imports, call graph, endpoints, chrome messaging, WebExtension manifests',
+    },
+    {
+      id: 't0.adapter-java',
+      language: 'Java',
+      extensions: ['java'],
+      covers: 'types, methods, call graph, Spring Web endpoint annotations',
+    },
+    {
+      id: 't0.iac-tf',
+      language: 'Terraform',
+      extensions: ['tf'],
+      covers: 'resource DAG, AWS capability edges',
+    },
+  ],
+  planned: [
+    { language: 'C', extensions: ['c', 'h'] },
+    { language: 'C++', extensions: ['cc', 'cpp', 'cxx', 'hpp', 'hh'] },
+    { language: 'Kotlin', extensions: ['kt', 'kts'] },
+    { language: 'Swift', extensions: ['swift'] },
+    { language: 'Objective-C', extensions: ['m', 'mm'] },
+  ],
+  detector: 'preflight@1',
+};
 
 const DEFAULTS: TierSettings[] = [
   {
@@ -46,6 +78,7 @@ const meta = {
     tiers: DEFAULTS,
     egressLabel: 'Local-only · 0 bytes egress',
     disclosures: { T2: T2_DISCLOSURE },
+    adapters: INVENTORY,
     error: null,
     canEdit: true,
     onToggleTier: fn(),
@@ -160,8 +193,43 @@ export const ConsentedTierIsRevocable: Story = {
   },
 };
 
+export const AdapterInventoryExplainsAndRecommends: Story = {
+  // AC-0087 (#163): installed adapters with coverage, the word "adapter"
+  // explained in place, and planned types wired to the request lane.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText('Adapters')).toBeInTheDocument();
+    // Plain-language explanation distinguishes adapters from frameworks
+    // and from toolchain versions.
+    await expect(
+      canvas.getByText(/framework markers Preflight detects, not adapters/),
+    ).toBeInTheDocument();
+    await expect(canvas.getByText(/a JDK bump never needs a new adapter/)).toBeInTheDocument();
+
+    const installed = canvas.getByRole('list', { name: 'Installed adapters' });
+    await expect(within(installed).getAllByRole('listitem')).toHaveLength(3);
+    await expect(within(installed).getByText('TypeScript/JavaScript')).toBeInTheDocument();
+    await expect(within(installed).getByText('t0.adapter-java')).toBeInTheDocument();
+    await expect(within(installed).getByText(/\.ts \.tsx \.js/)).toBeInTheDocument();
+    // Provably the Preflight registry: the shared detector id is stated.
+    await expect(canvas.getByText('preflight@1')).toBeInTheDocument();
+
+    const planned = canvas.getByRole('list', { name: 'Planned adapters' });
+    await expect(within(planned).getAllByRole('listitem')).toHaveLength(5);
+    for (const language of ['C', 'C++', 'Kotlin', 'Swift', 'Objective-C']) {
+      await expect(within(planned).getByText(language)).toBeInTheDocument();
+    }
+    const links = within(planned).getAllByRole('link', { name: 'Request this adapter' });
+    await expect(links).toHaveLength(5);
+    await expect(links[2]).toHaveAttribute(
+      'href',
+      expect.stringContaining('title=Adapter%20request%3A%20Kotlin'),
+    );
+  },
+};
+
 export const NoBackend: Story = {
-  args: { tiers: [], canEdit: false },
+  args: { tiers: [], canEdit: false, adapters: null },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
@@ -169,5 +237,9 @@ export const NoBackend: Story = {
     ).toBeInTheDocument();
     // T0's floor statement renders even with no core.
     await expect(canvas.getByText('always on')).toBeInTheDocument();
+    // No fabricated inventory without a core to report it.
+    await expect(
+      canvas.getByText(/connect a backend to list installed adapters/),
+    ).toBeInTheDocument();
   },
 };
