@@ -841,6 +841,35 @@ button.flow-hop-card:hover {
   padding: 0 1.25rem 1.25rem;
 }
 
+/* #165: the zero-flow state names each anchor kind sought and its count. */
+.flow-anchor-probes {
+  display: grid;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  max-width: 32rem;
+  padding: 0;
+}
+
+.flow-anchor-probes li {
+  align-items: baseline;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border-radius: 6px;
+  display: flex;
+  font-size: 0.85rem;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 0.4rem 0.65rem;
+}
+
+.flow-anchor-probes li.absent .flow-anchor-count {
+  opacity: 0.6;
+}
+
+.flow-anchor-probes li.found .flow-anchor-count {
+  font-weight: 600;
+}
+
 @media (max-width: 760px) {
   .flow-inspector-heading,
   .flow-inspector-toolbar {

@@ -71,6 +71,7 @@ export default function App() {
     topology,
     flows,
     flowList,
+    flowAnchors,
     specBundle,
     specMode,
     curation,
@@ -255,6 +256,7 @@ export default function App() {
           >
             <FlowsCard
               flows={flowList}
+              anchors={flowAnchors}
               dossier={flows}
               onSelectHop={(hop) =>
                 // Hops are evidence subjects like edges: the drawer reads the

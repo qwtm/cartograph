@@ -256,6 +256,14 @@ function installFakeCore() {
             depth_limited: false,
           },
         ];
+      case 'list_flow_anchors':
+        return [
+          { kind: 'screens (routes/pages)', found: 0 },
+          { kind: 'extension contexts (popup, background, content scripts)', found: 0 },
+          { kind: 'extension commands (keyboard shortcuts)', found: 0 },
+          { kind: 'HTTP endpoints', found: 1 },
+          { kind: 'externally published event channels', found: 0 },
+        ];
       case 'export_topology':
         return 'flowchart LR\n    res_aws_sqs_queue_orders["aws_sqs_queue.orders"]\n';
       case 'export_spec':

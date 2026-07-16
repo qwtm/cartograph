@@ -1,11 +1,14 @@
 import { useRef, useState } from 'react';
-import type { Flow, FlowHop, Tier } from '../store';
+import type { AnchorProbe, Flow, FlowHop, Tier } from '../store';
 
 export type FlowExportMode = 'verified-only' | 'best-effort';
 
 export interface FlowsCardProps {
   /** Traced flows as data — status and score surface per R-INT-2. */
   flows: Flow[];
+  /** Anchor kinds the tracer sought, with counts found (#165) — the empty
+   * state names them instead of guessing at a generic hint. */
+  anchors?: AnchorProbe[];
   /** Flow-dossier Markdown from the spec compiler, or null with no backend. */
   dossier: string | null;
   /** Open the evidence drawer for a hop's own provenance. */
@@ -96,6 +99,12 @@ export function hopKind(hop: FlowHop): string {
       return 'RESOURCE';
     case 'component':
       return 'COMPONENT';
+    case 'extctx':
+      return 'CONTEXT';
+    case 'extcmd':
+      return 'COMMAND';
+    case 'file':
+      return 'FILE';
     default:
       return hop.label.toUpperCase();
   }
@@ -238,7 +247,13 @@ function HopCard({ hop, index, excluded, onSelectHop, onOpenResolution }: HopCar
  * R-INT-5 projection toggle with an explicit hidden count, and a wrapping
  * hop-card sequence that never scrolls horizontally. Gap hops open the
  * Resolution Strategy; every other hop opens the evidence drawer. */
-export function FlowsCard({ flows, dossier, onSelectHop, onOpenResolution }: FlowsCardProps) {
+export function FlowsCard({
+  flows,
+  anchors,
+  dossier,
+  onSelectHop,
+  onOpenResolution,
+}: FlowsCardProps) {
   const [selectedTrigger, setSelectedTrigger] = useState(flows[0]?.trigger ?? '');
   const [mode, setMode] = useState<FlowExportMode>('best-effort');
   const [zoom, setZoom] = useState(1);
@@ -332,9 +347,28 @@ export function FlowsCard({ flows, dossier, onSelectHop, onOpenResolution }: Flo
       </div>
 
       {flows.length === 0 || !selected || !projected ? (
-        <p className="muted flow-inspector-empty">
-          No flows traced yet — ingest a repo with endpoints or event channels.
-        </p>
+        <div className="flow-inspector-empty">
+          <p className="muted">
+            No flows traced. A flow starts at a user-action anchor; recovery
+            looked for every kind it can trace:
+          </p>
+          {anchors && anchors.length > 0 ? (
+            <ul className="flow-anchor-probes" aria-label="Anchor kinds sought">
+              {anchors.map((probe) => (
+                <li key={probe.kind} className={probe.found > 0 ? 'found' : 'absent'}>
+                  <span className="flow-anchor-kind">{probe.kind}</span>
+                  <span className="flow-anchor-count">
+                    {probe.found > 0 ? `${probe.found} found` : 'none found'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">
+              No anchor inventory available — ingest a target first.
+            </p>
+          )}
+        </div>
       ) : (
         <>
           <div className="flow-inspector-toolbar">
