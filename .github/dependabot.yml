@@ -25,6 +25,10 @@ updates:
     groups:
       npm-ui-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # TS 7.x is blocked until typescript-eslint's peer range admits it (#174).
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
