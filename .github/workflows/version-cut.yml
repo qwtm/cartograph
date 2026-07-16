@@ -26,6 +26,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The changesets action pushes changeset-release/main with the
+          # credentials checkout persists in git config — NOT its env token.
+          # Without this override the branch push acts as github-actions[bot],
+          # and GitHub gates the version PR's workflows behind a manual
+          # "approve and run" click on every refresh, no matter who the PR
+          # author is. The maintainer PAT makes the pusher a real user.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
