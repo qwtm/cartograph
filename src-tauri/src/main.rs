@@ -2296,10 +2296,11 @@ fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
     // The platform default may already ship a (near-empty) Help submenu —
     // replace it rather than presenting two Help menus (#195 review).
     for item in menu.items()? {
-        if let Some(existing) = item.as_submenu() {
-            if existing.text()? == "Help" {
-                menu.remove(&item)?;
-            }
+        let Some(existing) = item.as_submenu() else {
+            continue;
+        };
+        if existing.text()? == "Help" {
+            menu.remove(&item)?;
         }
     }
     menu.append(&help)?;
