@@ -87,9 +87,10 @@
 - **AC-0015** Given a trigger, when traced, then each hop resolves at the lowest possible tier and records its tier.
 - **AC-0016** Given any unresolved hop, when no tier resolves it, then a Gap node truncates that branch (no silent completion).
 - **AC-0017** Given a completed trace, when scored, then flow_status ∈ {Verified, Partial, Inferred} per the scoring rule.
+- **AC-0083** Given a recovered WebExtension graph, when flows are traced, then extension user-action anchors trigger their own flows — every ExtensionContext, and every manifest Command routed to its dispatching context (`_execute_*` to the toolbar action, all others to background, with an explicit Gap when that context is absent) — whose hops walk ENTRY into the entry file and DEFINED_IN in reverse from that file into the symbols it defines, deterministically under input reordering, while internally published channels participate as mid-flow hops rather than triggers.
 - **Security:** —
 - **Performance:** Path queries bounded; long flows stream incrementally to UI.
-- **Trace:** M3–M5 · `flowtracer` · F-* · T-0015..0017
+- **Trace:** M3–M5 · `flowtracer` · F-* · T-0015..0017, T-0083
 
 ### US-0007 — Provenance and confidence on every fact
 - **Actor:** Engine
@@ -150,9 +151,10 @@
 - **AC-0031** Given the export toggle, when set to `verified-only`, then InferredWeak hops are excluded.
 - **AC-0065** Given the Flow Inspector surface, when it renders, then the header names the flow (stable id, status badge with the gap count spelled out, trigger summary, flow score), the projection note makes the verified-only/best-effort difference explicit (hidden count; excluded InferredWeak hops stay visible as annotated non-interactive cards; the Gap node is always retained per R-INT-4), and the hop sequence wraps responsively with Fit/zoom driving real layout widths — never a CSS transform — so the row never scrolls horizontally.
 - **AC-0066** Given a hop card, when clicked, then a hop ending at a Gap node opens the Resolution Strategy modal for that gap, and every other hop — including fail-closed hops with unrecognized confidence, which have no strategy to run — opens the read-only evidence drawer from the hop's own provenance.
+- **AC-0084** Given a target where zero flows trace, when the Flow Inspector renders, then the empty state names every anchor kind recovery sought (screens, extension contexts, extension commands, HTTP endpoints, externally published channels) with the count found for each — never a generic ingest hint.
 - **Security:** —
 - **Performance:** —
-- **Trace:** M9 · `app`, `flowtracer`, UI · F-* · T-0029..0031, T-0065..0066
+- **Trace:** M9 · `app`, `flowtracer`, UI · F-* · T-0029..0031, T-0065..0066, T-0084
 
 ### US-0012 — Spec Workbench, curation, and export
 - **Actor:** Engineer

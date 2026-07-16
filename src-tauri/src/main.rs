@@ -1877,6 +1877,21 @@ fn list_flows(state: State<'_, AppState>) -> Result<Vec<flowtracer::Flow>, Strin
     Ok(flowtracer::trace(&nodes, &edges))
 }
 
+/// The anchor kinds the tracer sought in the current graph, with counts —
+/// a zero-flow Inspector names what recovery looked for (#165, R-INT-4).
+#[tauri::command]
+fn list_flow_anchors(state: State<'_, AppState>) -> Result<Vec<flowtracer::AnchorProbe>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let mut nodes = Vec::new();
+    for label in flowtracer::FLOW_NODE_LABELS {
+        nodes.extend(graph.nodes_with_label(label).map_err(|e| e.to_string())?);
+    }
+    let edges = graph
+        .edges_with_labels(flowtracer::FLOW_EDGE_LABELS)
+        .map_err(|e| e.to_string())?;
+    Ok(flowtracer::anchor_probes(&nodes, &edges))
+}
+
 #[derive(Serialize)]
 struct SemanticPreview {
     eval_id: Option<i64>,
@@ -2120,6 +2135,7 @@ fn main() {
             export_topology,
             export_flows,
             list_flows,
+            list_flow_anchors,
             export_spec,
             semantic_preview,
             add_repo,

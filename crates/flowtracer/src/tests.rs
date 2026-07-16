@@ -528,3 +528,177 @@ fn endpoint_fetched_only_by_an_unrendered_component_keeps_its_flow() {
         "no screen reaches the fetch, so the server flow must not disappear"
     );
 }
+
+/// WebExtension dogfood shape: background context → entry file → its
+/// symbols → an internally published chrome-message channel → the content
+/// script consumer.
+fn webext_chain() -> (Vec<Node>, Vec<Edge>) {
+    let nodes = vec![
+        node(
+            "extctx:acme/ext@manifest.json:service-worker:background.js",
+            "ExtensionContext",
+            serde_json::json!({"kind": "service-worker", "entries": ["src/background.ts"]}),
+        ),
+        node(
+            "file:acme/ext@src/background.ts",
+            "File",
+            serde_json::json!({"path": "src/background.ts"}),
+        ),
+        node(
+            "sym:background.ts#onSave",
+            "Symbol",
+            serde_json::json!({"name": "onSave"}),
+        ),
+        node(
+            "chan:chrome-message:SAVE_SNAPSHOT",
+            "Channel",
+            serde_json::json!({"kind": "chrome-message", "identity": "SAVE_SNAPSHOT"}),
+        ),
+        node(
+            "sym:content.ts#onMessage",
+            "Symbol",
+            serde_json::json!({"name": "onMessage"}),
+        ),
+    ];
+    let edges = vec![
+        edge(
+            "extctx:acme/ext@manifest.json:service-worker:background.js",
+            "file:acme/ext@src/background.ts",
+            "ENTRY",
+            "Confirmed",
+        ),
+        // Stored symbol → file; the tracer walks it file → symbol.
+        edge(
+            "sym:background.ts#onSave",
+            "file:acme/ext@src/background.ts",
+            "DEFINED_IN",
+            "Confirmed",
+        ),
+        edge(
+            "sym:background.ts#onSave",
+            "chan:chrome-message:SAVE_SNAPSHOT",
+            "PUBLISHES",
+            "Confirmed",
+        ),
+        edge(
+            "sym:content.ts#onMessage",
+            "chan:chrome-message:SAVE_SNAPSHOT",
+            "SUBSCRIBES",
+            "Confirmed",
+        ),
+    ];
+    (nodes, edges)
+}
+
+// AC-0083: an ExtensionContext is a user-action anchor — the flow enters
+// through ENTRY, fans from the entry file into its symbols via reverse
+// DEFINED_IN, and crosses the internally published channel to its
+// consumer, deterministically under input reordering. (T-0083)
+#[test]
+fn extension_context_flow_walks_entry_and_defined_in_reverse() {
+    let (nodes, edges) = webext_chain();
+    let flows = trace(&nodes, &edges);
+
+    // The context is the only trigger: the chrome-message channel has a
+    // local publisher, so it is mid-flow, never its own anchor.
+    assert_eq!(flows.len(), 1);
+    let flow = &flows[0];
+    assert_eq!(flow.trigger_kind, "ExtensionContext");
+    assert_eq!(flow.trigger_name, "service-worker · src/background.ts");
+    let labels: Vec<&str> = flow.hops.iter().map(|h| h.label.as_str()).collect();
+    assert_eq!(labels, ["ENTRY", "DEFINED_IN", "PUBLISHES", "SUBSCRIBES"]);
+    // The reverse walk records traversal direction: file → symbol.
+    let defined = flow.hops.iter().find(|h| h.label == "DEFINED_IN").unwrap();
+    assert_eq!(defined.src, "file:acme/ext@src/background.ts");
+    assert_eq!(defined.dst, "sym:background.ts#onSave");
+    assert_eq!(flow.status, FlowStatus::Verified);
+
+    // Determinism (US-0014): reversed input, identical hops.
+    let mut rev_nodes = nodes.clone();
+    rev_nodes.reverse();
+    let mut rev_edges = edges.clone();
+    rev_edges.reverse();
+    let again = trace(&rev_nodes, &rev_edges);
+    let a: Vec<_> = flow
+        .hops
+        .iter()
+        .map(|h| (&h.label, &h.src, &h.dst))
+        .collect();
+    let b: Vec<_> = again[0]
+        .hops
+        .iter()
+        .map(|h| (&h.label, &h.src, &h.dst))
+        .collect();
+    assert_eq!(a, b);
+}
+
+// AC-0083: a manifest Command anchors its own flow and reaches the
+// handling context through HANDLES, then the context's chain. (T-0083)
+#[test]
+fn command_flow_reaches_the_background_handler_chain() {
+    let (mut nodes, mut edges) = webext_chain();
+    nodes.push(node(
+        "extcmd:acme/ext@manifest.json:save-snapshot",
+        "Command",
+        serde_json::json!({"name": "save-snapshot", "description": "Save it"}),
+    ));
+    edges.push(edge(
+        "extcmd:acme/ext@manifest.json:save-snapshot",
+        "extctx:acme/ext@manifest.json:service-worker:background.js",
+        "HANDLES",
+        "Confirmed",
+    ));
+
+    let flows = trace(&nodes, &edges);
+    let command = flows
+        .iter()
+        .find(|f| f.trigger_kind == "Command")
+        .expect("the command anchors a flow");
+    assert_eq!(command.trigger_name, "Command save-snapshot");
+    let labels: Vec<&str> = command.hops.iter().map(|h| h.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["HANDLES", "ENTRY", "DEFINED_IN", "PUBLISHES", "SUBSCRIBES"]
+    );
+    // The context stays an anchor of its own — both entries are real.
+    assert!(flows.iter().any(|f| f.trigger_kind == "ExtensionContext"));
+}
+
+// AC-0084: the anchor probes name every kind sought with the count found —
+// the zero-flow surface reports what recovery looked for, deterministically.
+// (T-0084)
+#[test]
+fn anchor_probes_count_every_kind_sought() {
+    let (nodes, edges) = webext_chain();
+    let probes = anchor_probes(&nodes, &edges);
+    let as_pairs: Vec<(&str, usize)> = probes.iter().map(|p| (p.kind.as_str(), p.found)).collect();
+    assert_eq!(
+        as_pairs,
+        [
+            ("screens (routes/pages)", 0),
+            ("extension contexts (popup, background, content scripts)", 1),
+            ("extension commands (keyboard shortcuts)", 0),
+            ("HTTP endpoints", 0),
+            // SAVE_SNAPSHOT is published locally — not an external channel.
+            ("externally published event channels", 0),
+        ]
+    );
+
+    // An empty slice still names every kind, all zero.
+    let none = anchor_probes(&[], &[]);
+    assert_eq!(none.len(), 5);
+    assert!(none.iter().all(|p| p.found == 0));
+
+    // A consumed-but-never-published channel counts as external.
+    let (mut nodes, mut edges) = webext_chain();
+    edges.retain(|e| e.label != "PUBLISHES");
+    nodes.push(node(
+        "screen:/x",
+        "Screen",
+        serde_json::json!({"route": "/x"}),
+    ));
+    let probes = anchor_probes(&nodes, &edges);
+    let find = |kind: &str| probes.iter().find(|p| p.kind.contains(kind)).unwrap().found;
+    assert_eq!(find("screens"), 1);
+    assert_eq!(find("externally published"), 1);
+}

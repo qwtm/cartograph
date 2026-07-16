@@ -2,10 +2,13 @@
 //! path engine.
 //!
 //! A flow starts at a trigger — a `Screen` (M4, the user-action anchor),
-//! an `Endpoint` nothing local fetches, or a `Channel` no local producer
-//! publishes to — and walks the graph hop by hop: `RENDERS` into
-//! components, `FETCHES` into endpoints, `HANDLES` into the handler
-//! symbol, `CALLS` through the call graph, `PUBLISHES` onto channels,
+//! an extension user-action anchor (`ExtensionContext` or manifest
+//! `Command`, #165), an `Endpoint` nothing local fetches, or a `Channel`
+//! no local producer publishes to — and walks the graph hop by hop:
+//! `RENDERS` into components, `FETCHES` into endpoints, `HANDLES` into
+//! the handler symbol or context, `ENTRY` into a context's entry file,
+//! `DEFINED_IN` in reverse from a file into the symbols it defines,
+//! `CALLS` through the call graph, `PUBLISHES` onto channels,
 //! `SUBSCRIBES` out to consumers. Each hop records the tier and confidence
 //! of the edge that resolved it (AC-0015). A hop into a `Gap` node
 //! truncates that branch — the flow is emitted partial, never silently
@@ -24,6 +27,8 @@ pub const FLOW_EDGE_LABELS: &[&str] = &[
     "RENDERS",
     "FETCHES",
     "HANDLES",
+    "ENTRY",
+    "DEFINED_IN",
     "CALLS",
     "PUBLISHES",
     "SUBSCRIBES",
@@ -36,6 +41,8 @@ pub const FLOW_NODE_LABELS: &[&str] = &[
     "Endpoint",
     "Symbol",
     "Channel",
+    "ExtensionContext",
+    "Command",
     "Gap",
     "File",
 ];
@@ -99,7 +106,8 @@ pub struct Hop {
 pub struct Flow {
     /// Trigger node id.
     pub trigger: String,
-    /// Trigger node label (`Endpoint` or `Channel`).
+    /// Trigger node label (`Screen`, `ExtensionContext`, `Command`,
+    /// `Endpoint`, or `Channel`).
     pub trigger_kind: String,
     /// Trigger display name.
     pub trigger_name: String,
@@ -137,6 +145,22 @@ fn display_name(node: &Node) -> String {
             (Some(k), Some(i)) => format!("{k}:{i}"),
             _ => node.id.clone(),
         },
+        "ExtensionContext" => {
+            let kind = p["kind"].as_str().unwrap_or("context");
+            let detail = p["entries"]
+                .as_array()
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.as_str())
+                .or_else(|| p["title"].as_str().filter(|title| !title.is_empty()));
+            match detail {
+                Some(detail) => format!("{kind} · {detail}"),
+                None => kind.to_string(),
+            }
+        }
+        "Command" => p["name"]
+            .as_str()
+            .map(|name| format!("Command {name}"))
+            .unwrap_or_else(|| node.id.clone()),
         "Gap" => format!("GAP: {}", p["reason"].as_str().unwrap_or("unresolved")),
         "File" => p["path"]
             .as_str()
@@ -200,13 +224,15 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
     let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
     // Adjacency, sorted for deterministic expansion. SUBSCRIBES is stored
-    // consumer → channel; the tracer walks it channel → consumer.
+    // consumer → channel and DEFINED_IN symbol → file; the tracer walks
+    // them reversed (channel → consumer, entry file → its symbols).
     let mut out_edges: BTreeMap<&str, Vec<&Edge>> = BTreeMap::new();
     let mut chan_consumers: BTreeMap<&str, Vec<&Edge>> = BTreeMap::new();
+    let mut file_symbols: BTreeMap<&str, Vec<&Edge>> = BTreeMap::new();
     let mut published_to: HashSet<&str> = HashSet::new();
     for edge in edges {
         match edge.label.as_str() {
-            "RENDERS" | "FETCHES" | "HANDLES" | "CALLS" | "PUBLISHES" => {
+            "RENDERS" | "FETCHES" | "HANDLES" | "ENTRY" | "CALLS" | "PUBLISHES" => {
                 out_edges.entry(edge.src.as_str()).or_default().push(edge);
                 if edge.label == "PUBLISHES" {
                     published_to.insert(edge.dst.as_str());
@@ -214,6 +240,12 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
             }
             "SUBSCRIBES" => {
                 chan_consumers
+                    .entry(edge.dst.as_str())
+                    .or_default()
+                    .push(edge);
+            }
+            "DEFINED_IN" => {
+                file_symbols
                     .entry(edge.dst.as_str())
                     .or_default()
                     .push(edge);
@@ -227,17 +259,25 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
     for v in chan_consumers.values_mut() {
         v.sort_by(|a, b| a.src.cmp(&b.src));
     }
+    for v in file_symbols.values_mut() {
+        v.sort_by(|a, b| a.src.cmp(&b.src));
+    }
 
-    // Triggers (SPEC-00 §5.1): every Screen (the user-action anchor) is
-    // traced first; an endpoint keeps its own flow unless a screen's
-    // traversal actually *reached* it (a FETCHES edge from an unrendered
-    // component must not make the server flow disappear); channels nothing
-    // local publishes to are external events entering the slice.
-    let mut screens: Vec<&Node> = nodes.iter().filter(|n| n.label == "Screen").collect();
-    screens.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut flows: Vec<Flow> = screens
+    // Triggers (SPEC-00 §5.1): every user-action anchor — a Screen, an
+    // ExtensionContext (popup, content script, background), or a manifest
+    // Command (#165) — is traced first; an endpoint keeps its own flow
+    // unless an anchor's traversal actually *reached* it (a FETCHES edge
+    // from an unrendered component must not make the server flow
+    // disappear); channels nothing local publishes to are external events
+    // entering the slice.
+    let mut anchors: Vec<&Node> = nodes
         .iter()
-        .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers))
+        .filter(|n| matches!(n.label.as_str(), "Screen" | "ExtensionContext" | "Command"))
+        .collect();
+    anchors.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut flows: Vec<Flow> = anchors
+        .iter()
+        .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers, &file_symbols))
         .collect();
     let covered: HashSet<&str> = flows
         .iter()
@@ -259,10 +299,69 @@ pub fn trace(nodes: &[Node], edges: &[Edge]) -> Vec<Flow> {
     rest.dedup_by(|a, b| a.id == b.id);
     flows.extend(
         rest.iter()
-            .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers)),
+            .map(|t| trace_one(t, &by_id, &out_edges, &chan_consumers, &file_symbols)),
     );
     flows.sort_by(|a, b| a.trigger.cmp(&b.trigger));
     flows
+}
+
+/// One anchor kind the tracer sought and how many the slice actually holds
+/// (#165) — zero flows must name what was looked for, never shrug.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnchorProbe {
+    /// Human-readable anchor kind, stable and display-ready.
+    pub kind: String,
+    /// Nodes of that kind present in the traced slice.
+    pub found: usize,
+}
+
+/// Count every anchor kind `trace` uses, in the order it seeks them.
+/// Deterministic for a given slice; independent of input order.
+pub fn anchor_probes(nodes: &[Node], edges: &[Edge]) -> Vec<AnchorProbe> {
+    let mut published_to: HashSet<&str> = HashSet::new();
+    let mut consumed: HashSet<&str> = HashSet::new();
+    for edge in edges {
+        match edge.label.as_str() {
+            "PUBLISHES" => {
+                published_to.insert(edge.dst.as_str());
+            }
+            "SUBSCRIBES" => {
+                consumed.insert(edge.dst.as_str());
+            }
+            _ => {}
+        }
+    }
+    let count = |label: &str| nodes.iter().filter(|n| n.label == label).count();
+    let external_channels = nodes
+        .iter()
+        .filter(|n| {
+            n.label == "Channel"
+                && consumed.contains(n.id.as_str())
+                && !published_to.contains(n.id.as_str())
+        })
+        .count();
+    vec![
+        AnchorProbe {
+            kind: "screens (routes/pages)".into(),
+            found: count("Screen"),
+        },
+        AnchorProbe {
+            kind: "extension contexts (popup, background, content scripts)".into(),
+            found: count("ExtensionContext"),
+        },
+        AnchorProbe {
+            kind: "extension commands (keyboard shortcuts)".into(),
+            found: count("Command"),
+        },
+        AnchorProbe {
+            kind: "HTTP endpoints".into(),
+            found: count("Endpoint"),
+        },
+        AnchorProbe {
+            kind: "externally published event channels".into(),
+            found: external_channels,
+        },
+    ]
 }
 
 fn trace_one(
@@ -270,6 +369,7 @@ fn trace_one(
     by_id: &BTreeMap<&str, &Node>,
     out_edges: &BTreeMap<&str, Vec<&Edge>>,
     chan_consumers: &BTreeMap<&str, Vec<&Edge>>,
+    file_symbols: &BTreeMap<&str, Vec<&Edge>>,
 ) -> Flow {
     let mut hops: Vec<Hop> = Vec::new();
     let mut seen_hops: HashSet<(String, String, String)> = HashSet::new();
@@ -281,7 +381,10 @@ fn trace_one(
         if depth >= MAX_DEPTH {
             // The bound cut the walk while this node still had somewhere to
             // go — that is a truncation, not a completion.
-            if out_edges.contains_key(id.as_str()) || chan_consumers.contains_key(id.as_str()) {
+            if out_edges.contains_key(id.as_str())
+                || chan_consumers.contains_key(id.as_str())
+                || file_symbols.contains_key(id.as_str())
+            {
                 depth_limited = true;
             }
             continue;
@@ -329,11 +432,18 @@ fn trace_one(
                 ));
             }
         }
-        if let Some(subs) = chan_consumers.get(id.as_str()) {
-            for edge in subs {
+        // Reversed edges: SUBSCRIBES walks channel → consumer, DEFINED_IN
+        // walks entry file → the symbols it defines (#165).
+        for reversed in [
+            chan_consumers.get(id.as_str()),
+            file_symbols.get(id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for edge in reversed {
                 let (tier, confidence, evidence, provenance) = edge_prov(edge);
                 let (gap_reason, attempted_tiers) = gap_context(by_id.get(edge.src.as_str()));
-                // Traversal direction: channel → consumer.
                 next.push((
                     Hop {
                         label: edge.label.clone(),

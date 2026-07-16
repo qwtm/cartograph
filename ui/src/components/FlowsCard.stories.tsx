@@ -130,7 +130,90 @@ type Story = StoryObj<typeof meta>;
 export const Empty: Story = {
   args: { flows: [], dossier: '# Flow dossier\n' },
   play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByText(/no flows traced yet/i)).toBeInTheDocument();
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/no flows traced/i)).toBeInTheDocument();
+    // Without an anchor inventory the state still says why, not a hint.
+    await expect(canvas.getByText(/no anchor inventory available/i)).toBeInTheDocument();
+  },
+};
+
+export const EmptyNamesEveryAnchorKindSought: Story = {
+  // AC-0084 (#165): zero flows must name the anchor kinds recovery looked
+  // for and what it found — never the generic "ingest a repo" shrug.
+  args: {
+    flows: [],
+    dossier: '# Flow dossier\n',
+    anchors: [
+      { kind: 'screens (routes/pages)', found: 0 },
+      { kind: 'extension contexts (popup, background, content scripts)', found: 0 },
+      { kind: 'extension commands (keyboard shortcuts)', found: 0 },
+      { kind: 'HTTP endpoints', found: 0 },
+      { kind: 'externally published event channels', found: 0 },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const probes = canvas.getByLabelText('Anchor kinds sought');
+    const rows = within(probes).getAllByRole('listitem');
+    await expect(rows).toHaveLength(5);
+    await expect(probes).toHaveTextContent('screens (routes/pages)');
+    await expect(probes).toHaveTextContent('extension commands (keyboard shortcuts)');
+    await expect(within(probes).getAllByText('none found')).toHaveLength(5);
+    await expect(canvas.queryByText(/ingest a repo with endpoints/i)).not.toBeInTheDocument();
+  },
+};
+
+const COMMAND_FLOW: Flow = {
+  trigger: 'extcmd:local/ext@.:save-snapshot',
+  trigger_kind: 'Command',
+  trigger_name: 'Command save-snapshot',
+  hops: [
+    hop(
+      'HANDLES',
+      'extcmd:local/ext@.:save-snapshot',
+      'extctx:local/ext@.:service-worker:background.js',
+      'Command save-snapshot',
+      'service-worker · src/background.ts',
+      'Confirmed',
+    ),
+    hop(
+      'ENTRY',
+      'extctx:local/ext@.:service-worker:background.js',
+      'file:local/ext@src/background.ts',
+      'service-worker · src/background.ts',
+      'src/background.ts',
+      'Confirmed',
+    ),
+    hop(
+      'DEFINED_IN',
+      'file:local/ext@src/background.ts',
+      'sym:background.ts#onSave',
+      'src/background.ts',
+      'onSave',
+      'Confirmed',
+    ),
+  ],
+  status: 'Verified',
+  score: 1,
+  depth_limited: false,
+};
+
+export const ExtensionCommandAnchorsAFlow: Story = {
+  // AC-0083 (#165): a manifest command is a user-action anchor whose hops
+  // carry provenance like any other flow.
+  args: { flows: [COMMAND_FLOW], dossier: projectedDossier([COMMAND_FLOW], 'best-effort') },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole('heading', { level: 2 })).toHaveTextContent(
+      'F-0001 · Command save-snapshot',
+    );
+    await expect(canvas.getByText('TRIGGER · Command')).toBeInTheDocument();
+    const sequence = canvas.getByLabelText('Flow sequence');
+    await expect(within(sequence).getByText('CONTEXT')).toBeInTheDocument();
+    await expect(within(sequence).getByText('FILE')).toBeInTheDocument();
+    await expect(within(sequence).getByText('FUNCTION')).toBeInTheDocument();
+    await expect(hopKind(COMMAND_FLOW.hops[0])).toBe('CONTEXT');
+    await expect(hopKind(COMMAND_FLOW.hops[1])).toBe('FILE');
   },
 };
 

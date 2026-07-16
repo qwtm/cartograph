@@ -385,9 +385,14 @@ pub fn extract_manifests(
         });
 
         // --- Execution contexts ---------------------------------------------
+        // Commands and other platform-dispatched triggers land in specific
+        // contexts; remember the background and action contexts as they are
+        // built so the commands section can bind handlers (#165).
+        let mut background_ctx: Option<String> = None;
+        let mut action_ctx: Option<String> = None;
         let background = &manifest["background"];
         if let Some(worker) = background["service_worker"].as_str() {
-            cx.context(
+            let ctx = cx.context(
                 &mut out,
                 &ext_id,
                 "service-worker",
@@ -396,10 +401,11 @@ pub fn extract_manifests(
                 &[worker.to_string()],
                 serde_json::json!({}),
             );
+            background_ctx.get_or_insert(ctx);
         }
         let mv2_scripts = strings(&background["scripts"]);
         if !mv2_scripts.is_empty() {
-            cx.context(
+            let ctx = cx.context(
                 &mut out,
                 &ext_id,
                 "background-scripts",
@@ -408,9 +414,10 @@ pub fn extract_manifests(
                 &mv2_scripts,
                 serde_json::json!({}),
             );
+            background_ctx.get_or_insert(ctx);
         }
         if let Some(page) = background["page"].as_str() {
-            cx.context(
+            let ctx = cx.context(
                 &mut out,
                 &ext_id,
                 "background-page",
@@ -419,6 +426,7 @@ pub fn extract_manifests(
                 &[page.to_string()],
                 serde_json::json!({}),
             );
+            background_ctx.get_or_insert(ctx);
         }
         if let Some(scripts) = manifest["content_scripts"].as_array() {
             for (index, script) in scripts.iter().enumerate() {
@@ -449,7 +457,7 @@ pub fn extract_manifests(
             ("devtools_page", manifest["devtools_page"].as_str()),
         ] {
             if let Some(page) = value {
-                cx.context(
+                let ctx = cx.context(
                     &mut out,
                     &ext_id,
                     "page",
@@ -458,6 +466,9 @@ pub fn extract_manifests(
                     &[page.to_string()],
                     serde_json::json!({}),
                 );
+                if anchor == "action" || anchor == "browser_action" {
+                    action_ctx.get_or_insert(ctx);
+                }
             }
         }
         // A toolbar action with no popup is still a user trigger — the MV3
@@ -465,7 +476,7 @@ pub fn extract_manifests(
         for anchor in ["action", "browser_action"] {
             let action = &manifest[anchor];
             if action.is_object() && action["default_popup"].is_null() {
-                cx.context(
+                let ctx = cx.context(
                     &mut out,
                     &ext_id,
                     "action",
@@ -476,6 +487,7 @@ pub fn extract_manifests(
                         "title": action["default_title"].as_str().unwrap_or_default(),
                     }),
                 );
+                action_ctx.get_or_insert(ctx);
             }
         }
 
@@ -500,6 +512,58 @@ pub fn extract_manifests(
                         "prov": cx.prov("commands", name, &format!("DECLARES {ext_id} -> {cmd_id}")),
                     }),
                 });
+                // Platform dispatch contract (#165): `_execute_*` commands
+                // open the toolbar action; every other command fires in the
+                // background context. A command with no such context cannot
+                // run — that is an explicit Gap, never a silent dead end.
+                let (handler, missing) = if name.starts_with("_execute_") {
+                    (action_ctx.as_deref(), "no action/browser_action context")
+                } else {
+                    (background_ctx.as_deref(), "no background context")
+                };
+                match handler {
+                    Some(ctx_id) => out.edges.push(Edge {
+                        src: cmd_id.clone(),
+                        dst: ctx_id.to_string(),
+                        label: "HANDLES".into(),
+                        props: serde_json::json!({
+                            "prov": cx.prov("commands", name, &format!("HANDLES {cmd_id} -> {ctx_id}")),
+                        }),
+                    }),
+                    None => {
+                        let gap_id = format!("gap:webext:{}@command:{name}", cx.id.repo);
+                        let reason = format!("{missing} to receive command {name}");
+                        out.nodes.push(Node {
+                            id: gap_id.clone(),
+                            label: "Gap".into(),
+                            props: serde_json::json!({
+                                "reason": reason,
+                                "attempted_tiers": ["T0"],
+                                "prov": prov_value(
+                                    cx.id,
+                                    &cx.path,
+                                    span_scoped(&cx.raw, "commands", name),
+                                    ConfidenceTier::Gap,
+                                    &format!("Gap {gap_id}"),
+                                ),
+                            }),
+                        });
+                        out.edges.push(Edge {
+                            src: cmd_id.clone(),
+                            dst: gap_id.clone(),
+                            label: "HANDLES".into(),
+                            props: serde_json::json!({
+                                "prov": prov_value(
+                                    cx.id,
+                                    &cx.path,
+                                    span_scoped(&cx.raw, "commands", name),
+                                    ConfidenceTier::Gap,
+                                    &format!("HANDLES {cmd_id} -> {gap_id}"),
+                                ),
+                            }),
+                        });
+                    }
+                }
             }
         }
 
@@ -708,6 +772,66 @@ mod tests {
             edge.label == "ENTRY"
                 && edge.dst
                     == "gap:webext:local/image-trail@extension/src/content/content-script.js"
+        }));
+    }
+
+    #[test]
+    fn commands_bind_to_their_dispatching_context_or_gap() {
+        // #165: the platform contract routes `_execute_*` to the toolbar
+        // action and every other command to the background context.
+        let dir = fixture();
+        let out = extract(&dir);
+        let handles: Vec<(&str, &str)> = out
+            .edges
+            .iter()
+            .filter(|edge| edge.label == "HANDLES")
+            .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+            .collect();
+        assert!(handles.contains(&(
+            "extcmd:local/image-trail@extension:_execute_action",
+            "extctx:local/image-trail@extension:action:action",
+        )));
+        assert!(handles.contains(&(
+            "extcmd:local/image-trail@extension:shortcut-download",
+            "extctx:local/image-trail@extension:service-worker:src/background/service-worker.js",
+        )));
+        let bound = out
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.label == "HANDLES"
+                    && edge.src == "extcmd:local/image-trail@extension:shortcut-download"
+            })
+            .unwrap();
+        let prov: Provenance = serde_json::from_value(bound.props["prov"].clone()).unwrap();
+        assert_eq!(prov.confidence_tier, ConfidenceTier::Confirmed);
+
+        // A command with no context that could receive it fails closed.
+        let orphan_dir = tempfile::tempdir().unwrap();
+        let manifest = r#"{
+  "manifest_version": 3,
+  "name": "orphan",
+  "commands": { "do-thing": { "description": "d" } }
+}"#;
+        std::fs::write(orphan_dir.path().join("manifest.json"), manifest).unwrap();
+        let id = SourceId {
+            repo: "local/orphan",
+            commit: "abc123",
+        };
+        let (out, _) = extract_manifests(orphan_dir.path(), &id, &BTreeSet::new()).unwrap();
+        let gap = out
+            .nodes
+            .iter()
+            .find(|node| node.label == "Gap" && node.id.contains("command:do-thing"))
+            .expect("unroutable command is an explicit gap");
+        assert_eq!(
+            gap.props["reason"],
+            "no background context to receive command do-thing"
+        );
+        assert!(out.edges.iter().any(|edge| {
+            edge.label == "HANDLES"
+                && edge.src == "extcmd:local/orphan@.:do-thing"
+                && edge.dst == gap.id
         }));
     }
 
