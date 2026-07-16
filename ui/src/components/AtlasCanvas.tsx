@@ -1,4 +1,5 @@
 import cytoscape from 'cytoscape';
+import { HelpTip } from './HelpTip';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BAND_LABELS, buildAtlasScene, type AtlasScene } from '../atlasLayout';
 import type { AtlasSnapshot, GraphEdge, GraphNode, Tier } from '../store';
@@ -543,6 +544,7 @@ export function AtlasCanvas({ snapshot, onSelect, onSelectEdge, onLayerChange }:
       </nav>
 
       <div className="atlas-legend" aria-label="Confidence legend">
+        <HelpTip topic="tiers" />
         {TIERS.map((tier) => (
           <span key={tier.id} className={`atlas-legend-${tier.id.toLowerCase()}`}>
             {tier.label}

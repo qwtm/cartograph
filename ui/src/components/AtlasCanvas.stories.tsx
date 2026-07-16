@@ -118,6 +118,10 @@ export const ConfidenceOverlay: Story = {
     for (const label of ['Confirmed', 'Inferred strong', 'Inferred weak', 'Gap']) {
       await expect(canvas.getByText(label)).toBeInTheDocument();
     }
+    // #164: the legend explains confidence tiers in place.
+    await expect(
+      canvas.getByRole('button', { name: 'What is confidence tiers?' }),
+    ).toBeInTheDocument();
     const toggle = canvas.getByRole('button', { name: 'Confidence overlay' });
     await expect(toggle).toHaveAttribute('aria-pressed', 'true');
     await userEvent.click(toggle);

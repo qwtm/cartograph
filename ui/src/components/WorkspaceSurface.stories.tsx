@@ -90,6 +90,11 @@ export const PartialRecovery: Story = {
     await expect(canvas.getByText('InferredStrong overall')).toBeInTheDocument();
     const outcome = within(canvas.getByTestId('outcome-card'));
     await expect(outcome.getByText('6 open findings')).toBeInTheDocument();
+    // #164: outcome jargon and artifact authority explain themselves.
+    await expect(outcome.getByRole('button', { name: 'What is system gap?' })).toBeInTheDocument();
+    await expect(
+      canvas.getByRole('button', { name: 'What is recovery authority?' }),
+    ).toBeInTheDocument();
     await expect(
       outcome.getByText(/3 gaps and 2 unsupported patterns \(plus 1 no-evidence\)/),
     ).toBeInTheDocument();

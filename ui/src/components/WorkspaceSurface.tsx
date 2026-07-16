@@ -1,3 +1,4 @@
+import { HelpTip } from './HelpTip';
 import type {
   FindingsSummary,
   IngestSummary,
@@ -136,7 +137,8 @@ export function WorkspaceSurface({
           {recovered ? (
             <p>
               A third party could re-specify the Confirmed core from the artifacts.{' '}
-              <strong>{findings.open_findings} open findings</strong> — {findings.gaps} gaps and{' '}
+              <strong>{findings.open_findings} open findings</strong>
+              <HelpTip topic="gap" /> — {findings.gaps} gaps and{' '}
               {findings.unsupported} unsupported patterns (plus {findings.no_evidence}{' '}
               no-evidence) — are listed explicitly rather than guessed. Triage them to raise
               recovery authority.
@@ -202,7 +204,10 @@ export function WorkspaceSurface({
             eval health live in Provenance &amp; Eval.
           </p>
 
-          <h3 className="settings-section-title">Artifacts</h3>
+          <h3 className="settings-section-title">
+            Artifacts
+            <HelpTip topic="authority" />
+          </h3>
           <ul className="artifact-grid">
             {ARTIFACT_CARDS.map((card) => {
               const generated = bundle?.artifacts.some(
