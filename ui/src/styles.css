@@ -2745,6 +2745,25 @@ button.flow-hop-card:hover {
   font-size: 0.78rem;
 }
 
+/* Conformance-gate verdict per plugin artifact (#200). */
+.gate-chip {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-badge);
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  color: var(--text-muted);
+}
+
+.gate-chip.gate-passed {
+  border-color: var(--tier-confirmed);
+  color: var(--tier-confirmed);
+}
+
+.gate-chip.gate-failed {
+  border-color: var(--tier-gap);
+  color: var(--tier-gap);
+}
+
 .adapter-row p {
   margin: 0.25rem 0 0;
 }

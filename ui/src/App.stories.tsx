@@ -270,6 +270,8 @@ function installFakeCore() {
         return [];
       case 'set_plugin_enabled':
         return null;
+      case 'run_plugin_gate':
+        return { passed: true, checks: [] };
       case 'adapter_inventory':
         return {
           installed: [

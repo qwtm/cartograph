@@ -206,6 +206,11 @@ export interface PluginStatus {
   project_root: string | null;
   shadowed_user_copy: boolean;
   enabled: boolean;
+  /** Conformance-gate verdict for these exact bytes (#200). `ungated` is
+   * the proposed state; only `passed` ever joins extraction. */
+  gate: 'passed' | 'failed' | 'ungated';
+  /** First failing check as `name: detail` when the gate failed. */
+  gate_detail: string | null;
 }
 
 export type SpecExportMode = 'verified-only' | 'best-effort';
@@ -486,6 +491,8 @@ export interface AppStore {
   plugins: PluginStatus[];
   /** Toggle a plugin (bound to its exact artifact hash) and refresh. */
   setPluginEnabled: (plugin: PluginStatus, enabled: boolean) => Promise<void>;
+  /** Run the conformance gate for a plugin as a durable job (#200). */
+  runPluginGate: (plugin: PluginStatus) => Promise<void>;
   /** Repos whose facts are in the current system graph (#162). */
   systemContents: SystemRepo[];
   /** Full official artifact set under the active R-INT-5 mode. */
@@ -742,6 +749,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       contentHash: plugin.content_hash,
       enabled,
     });
+    const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
+    set({ plugins });
+  },
+
+  runPluginGate: async (plugin: PluginStatus) => {
+    // The verdict lands in the settings store keyed by content hash; the
+    // refreshed list reflects passed/failed for these exact bytes.
+    await invokeOr('run_plugin_gate', null, { pluginId: plugin.id });
     const plugins = await invokeOr<PluginStatus[]>('list_plugins', []);
     set({ plugins });
   },
