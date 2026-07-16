@@ -8,9 +8,15 @@ const INVENTORY: AdapterInventory = {
   installed: [
     {
       id: 't0.adapter-ts',
-      language: 'TypeScript/JavaScript',
-      extensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'],
-      covers: 'imports, call graph, endpoints, chrome messaging, WebExtension manifests',
+      language: 'TypeScript',
+      extensions: ['ts', 'tsx'],
+      covers: 'imports, call graph, endpoints, chrome messaging, IndexedDB',
+    },
+    {
+      id: 't0.webextension',
+      language: 'WebExtension',
+      extensions: [],
+      covers: 'manifest.json contexts, commands, permissions as grants',
     },
     {
       id: 't0.adapter-java',
@@ -19,13 +25,14 @@ const INVENTORY: AdapterInventory = {
       covers: 'types, methods, call graph, Spring Web endpoint annotations',
     },
     {
-      id: 't0.iac-tf',
+      id: 't0.iac-terraform',
       language: 'Terraform',
       extensions: ['tf'],
       covers: 'resource DAG, AWS capability edges',
     },
   ],
   planned: [
+    { language: 'JavaScript', extensions: ['js', 'jsx', 'mjs', 'cjs'] },
     { language: 'C', extensions: ['c', 'h'] },
     { language: 'C++', extensions: ['cc', 'cpp', 'cxx', 'hpp', 'hh'] },
     { language: 'Kotlin', extensions: ['kt', 'kts'] },
@@ -207,21 +214,22 @@ export const AdapterInventoryExplainsAndRecommends: Story = {
     await expect(canvas.getByText(/a JDK bump never needs a new adapter/)).toBeInTheDocument();
 
     const installed = canvas.getByRole('list', { name: 'Installed adapters' });
-    await expect(within(installed).getAllByRole('listitem')).toHaveLength(3);
-    await expect(within(installed).getByText('TypeScript/JavaScript')).toBeInTheDocument();
+    await expect(within(installed).getAllByRole('listitem')).toHaveLength(4);
+    await expect(within(installed).getByText('TypeScript')).toBeInTheDocument();
+    await expect(within(installed).getByText('t0.webextension')).toBeInTheDocument();
     await expect(within(installed).getByText('t0.adapter-java')).toBeInTheDocument();
-    await expect(within(installed).getByText(/\.ts \.tsx \.js/)).toBeInTheDocument();
+    await expect(within(installed).getByText(/\.ts \.tsx/)).toBeInTheDocument();
     // Provably the Preflight registry: the shared detector id is stated.
     await expect(canvas.getByText('preflight@1')).toBeInTheDocument();
 
     const planned = canvas.getByRole('list', { name: 'Planned adapters' });
-    await expect(within(planned).getAllByRole('listitem')).toHaveLength(5);
-    for (const language of ['C', 'C++', 'Kotlin', 'Swift', 'Objective-C']) {
+    await expect(within(planned).getAllByRole('listitem')).toHaveLength(6);
+    for (const language of ['JavaScript', 'C', 'C++', 'Kotlin', 'Swift', 'Objective-C']) {
       await expect(within(planned).getByText(language)).toBeInTheDocument();
     }
     const links = within(planned).getAllByRole('link', { name: 'Request this adapter' });
-    await expect(links).toHaveLength(5);
-    await expect(links[2]).toHaveAttribute(
+    await expect(links).toHaveLength(6);
+    await expect(links[3]).toHaveAttribute(
       'href',
       expect.stringContaining('title=Adapter%20request%3A%20Kotlin'),
     );

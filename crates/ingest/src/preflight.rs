@@ -86,10 +86,17 @@ pub struct AdapterInfo {
 pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
     AdapterInfo {
         id: "t0.adapter-ts",
-        language: "TypeScript/JavaScript",
-        extensions: &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
+        language: "TypeScript",
+        extensions: &["ts", "tsx"],
         covers: "imports, call graph, endpoints (Express/Next/React Router), \
-                 chrome messaging channels, WebExtension manifests, IndexedDB",
+                 chrome messaging channels, IndexedDB",
+    },
+    AdapterInfo {
+        id: "t0.webextension",
+        language: "WebExtension",
+        extensions: &[],
+        covers: "manifest.json execution contexts (background, content scripts, \
+                 popups), keyboard commands, permissions as grants, entry binding",
     },
     AdapterInfo {
         id: "t0.adapter-python",
@@ -110,7 +117,7 @@ pub const INSTALLED_ADAPTERS: &[AdapterInfo] = &[
         covers: "types, methods, call graph, Spring Web endpoint annotations",
     },
     AdapterInfo {
-        id: "t0.iac-tf",
+        id: "t0.iac-terraform",
         language: "Terraform",
         extensions: &["tf"],
         covers: "resource DAG, AWS capability edges (TRIGGERS/ROUTES/GRANTS)",
@@ -132,6 +139,10 @@ pub struct PlannedAdapter {
 /// The recommendation catalog (#163): languages Preflight can detect and
 /// name as installable-later adapter types.
 pub const PLANNED_ADAPTERS: &[PlannedAdapter] = &[
+    PlannedAdapter {
+        language: "JavaScript",
+        extensions: &["js", "jsx", "mjs", "cjs"],
+    },
     PlannedAdapter {
         language: "C",
         extensions: &["c", "h"],
@@ -225,6 +236,15 @@ pub fn preflight(root: &Path) -> std::io::Result<PreflightReport> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
+            // Risky-construct scanning is per-syntax, not per-coverage: a
+            // .js file still gets eval/WASM findings even though JavaScript
+            // extraction is a planned adapter (#192 review).
+            if matches!(
+                extension.as_str(),
+                "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+            ) {
+                scan_source(&path, &rel, &mut unsupported, &mut potential_gaps)?;
+            }
             if let Some((language, adapter)) = adapter_for(&extension) {
                 let entry = languages
                     .entry(language.to_string())
@@ -234,12 +254,6 @@ pub fn preflight(root: &Path) -> std::io::Result<PreflightReport> {
                         adapter: Some(adapter.to_string()),
                     });
                 entry.files += 1;
-                if matches!(
-                    extension.as_str(),
-                    "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
-                ) {
-                    scan_source(&path, &rel, &mut unsupported, &mut potential_gaps)?;
-                }
             } else if let Some(language) = uncovered_language(&extension) {
                 let entry = languages
                     .entry(language.to_string())
@@ -471,13 +485,13 @@ mod tests {
             .map(|l| (l.language.as_str(), l))
             .collect();
         assert_eq!(
-            by_language["TypeScript/JavaScript"].adapter.as_deref(),
+            by_language["TypeScript"].adapter.as_deref(),
             Some("t0.adapter-ts")
         );
         assert_eq!(by_language["Go"].adapter.as_deref(), Some("t0.adapter-go"));
         assert_eq!(
             by_language["Terraform"].adapter.as_deref(),
-            Some("t0.iac-tf")
+            Some("t0.iac-terraform")
         );
         // Ruby is named but uncovered — and surfaces as an unsupported finding.
         assert_eq!(by_language["Ruby"].adapter, None);
