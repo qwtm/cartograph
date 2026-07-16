@@ -239,6 +239,8 @@ export const AdapterInventoryExplainsAndRecommends: Story = {
 export const DiscoveredPluginsToggle: Story = {
   // #198 (AC-0068 slice): discovered plugins list with scope, content hash,
   // and a per-project fail-closed toggle — off until explicitly enabled.
+  // #200: per-artifact gate verdicts (passed/failed/proposed) with the
+  // failing check named, and a run-gate action per plugin.
   args: {
     plugins: [
       {
@@ -249,6 +251,8 @@ export const DiscoveredPluginsToggle: Story = {
         project_root: '/repo',
         shadowed_user_copy: true,
         enabled: false,
+        gate: 'ungated',
+        gate_detail: null,
       },
       {
         id: 't0.adapter-swift',
@@ -258,14 +262,28 @@ export const DiscoveredPluginsToggle: Story = {
         project_root: null,
         shadowed_user_copy: false,
         enabled: true,
+        gate: 'passed',
+        gate_detail: null,
+      },
+      {
+        id: 't0.adapter-crystal',
+        path: '/home/u/adapters/t0.adapter-crystal.wasm',
+        content_hash: '5555aaaa5555aaaa5555aa',
+        scope: 'user',
+        project_root: null,
+        shadowed_user_copy: false,
+        enabled: false,
+        gate: 'failed',
+        gate_detail: 'golden:src/main.cr: expected 3 fact(s), got 1',
       },
     ],
     onTogglePlugin: fn(),
+    onRunGate: fn(),
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     const list = within(canvas.getByRole('list', { name: 'Discovered plugins' }));
-    await expect(list.getAllByRole('listitem')).toHaveLength(2);
+    await expect(list.getAllByRole('listitem')).toHaveLength(3);
     // Fail-closed default is stated, plus discovery provenance.
     await expect(canvas.getByText(/off until you enable it here/)).toBeInTheDocument();
     await expect(list.getByText(/Project copy \(shadows a user-level copy\)/)).toBeInTheDocument();
@@ -281,6 +299,22 @@ export const DiscoveredPluginsToggle: Story = {
 
     const swift = list.getByRole('switch', { name: 't0.adapter-swift enabled for this project' });
     await expect(swift).toHaveAttribute('aria-checked', 'true');
+
+    // Gate verdicts per artifact: ungated is a proposed state, a failure
+    // names the failing check, and only `passed` reads as gated (#200).
+    await expect(list.getByText('Proposed — gate not run')).toBeInTheDocument();
+    await expect(list.getByText('Gate passed')).toBeInTheDocument();
+    await expect(list.getByText('Gate failed')).toBeInTheDocument();
+    await expect(
+      list.getByText('golden:src/main.cr: expected 3 fact(s), got 1'),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      list.getByRole('button', { name: 'Run conformance gate for t0.adapter-ruby' }),
+    );
+    await expect(args.onRunGate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 't0.adapter-ruby' }),
+    );
   },
 };
 

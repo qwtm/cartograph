@@ -118,13 +118,19 @@ fn graph_stats(state: State<'_, AppState>) -> Result<GraphStats, String> {
     })
 }
 
-/// One discovered plugin with its per-project lifecycle state (#198).
+/// One discovered plugin with its per-project lifecycle state (#198) and
+/// its conformance-gate verdict for these exact bytes (#200).
 #[derive(Serialize)]
 struct PluginStatus {
     #[serde(flatten)]
     plugin: adapters_plugin_host::discovery::DiscoveredPlugin,
     /// Explicit per-project opt-in; absent rows are disabled (fail closed).
     enabled: bool,
+    /// `passed`, `failed`, or `ungated` — the proposed state every artifact
+    /// starts in. Keyed by content hash: replaced bytes are `ungated` again.
+    gate: &'static str,
+    /// First failing check as `name: detail` when the gate failed.
+    gate_detail: Option<String>,
 }
 
 /// The lifecycle key for a plugin's enablement rows: the resolved project
@@ -143,11 +149,10 @@ fn plugin_settings_root(plugin: &adapters_plugin_host::discovery::DiscoveredPlug
 /// adapters directory. Project wins on id conflict. Enablement joins on the
 /// exact artifact hash, so replaced bytes are disabled again. Discovery
 /// never runs guest code.
-#[tauri::command]
-fn list_plugins(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<PluginStatus>, String> {
+fn discover_session_plugins<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+) -> Result<Vec<adapters_plugin_host::discovery::DiscoveredPlugin>, String> {
     let user_dir = app
         .path()
         .app_data_dir()
@@ -160,7 +165,15 @@ fn list_plugins(
         .iter()
         .map(std::path::PathBuf::from)
         .collect();
-    let discovered = adapters_plugin_host::discovery::discover(&roots, &user_dir);
+    Ok(adapters_plugin_host::discovery::discover(&roots, &user_dir))
+}
+
+#[tauri::command]
+fn list_plugins(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PluginStatus>, String> {
+    let discovered = discover_session_plugins(&app, &state)?;
     let settings_store = state.settings.lock().map_err(|e| e.to_string())?;
     let mut statuses = Vec::with_capacity(discovered.len());
     for plugin in discovered {
@@ -169,9 +182,168 @@ fn list_plugins(
             .map_err(|e| e.to_string())?
             .iter()
             .any(|(id, hash)| *id == plugin.id && *hash == plugin.content_hash);
-        statuses.push(PluginStatus { enabled, plugin });
+        let (gate, gate_detail) = match settings_store
+            .plugin_gate(&plugin.id, &plugin.content_hash)
+            .map_err(|e| e.to_string())?
+        {
+            Some((true, _)) => ("passed", None),
+            Some((false, report_json)) => ("failed", first_failing_check(&report_json)),
+            None => ("ungated", None),
+        };
+        statuses.push(PluginStatus {
+            enabled,
+            gate,
+            gate_detail,
+            plugin,
+        });
     }
     Ok(statuses)
+}
+
+/// `name: detail` of the first failing check in a stored gate report — the
+/// one line a user needs to see next to a `failed` chip.
+fn first_failing_check(report_json: &str) -> Option<String> {
+    let report: serde_json::Value = serde_json::from_str(report_json).ok()?;
+    report["checks"].as_array()?.iter().find_map(|check| {
+        if check["passed"].as_bool() == Some(false) {
+            Some(format!(
+                "{}: {}",
+                check["name"].as_str().unwrap_or("check"),
+                check["detail"].as_str().unwrap_or("failed")
+            ))
+        } else {
+            None
+        }
+    })
+}
+
+/// The fixed source identity conformance corpora are authored against:
+/// golden node/edge ids that embed the repo must use `golden` (the host
+/// hands the plugin this exact repo/commit during the gate, and only then).
+fn gate_source_id() -> adapters_plugin_host::SourceId {
+    adapters_plugin_host::SourceId {
+        repo: "golden".to_string(),
+        commit: "golden".to_string(),
+    }
+}
+
+/// Run the conformance gate for one discovered plugin as a durable job
+/// (#200, AC-0068): SPI contract under the standard bounds, the
+/// generator-supplied golden corpus (`{plugin-id}.golden.json` next to the
+/// artifact), and a double-run determinism check. The verdict persists per
+/// (plugin id, content hash) — a missing or unreadable corpus records a
+/// failed gate, never a skipped one, and the plugin stays proposed until a
+/// recorded pass for these exact bytes.
+#[tauri::command]
+async fn run_plugin_gate(
+    plugin_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let job_id = {
+        let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        let job = jobs
+            .enqueue(&format!("plugin-gate:{plugin_id}"))
+            .map_err(|e| e.to_string())?;
+        jobs.set_status(job.id, "running")
+            .map_err(|e| e.to_string())?;
+        let running = jobs.get(job.id).map_err(|e| e.to_string())?;
+        emit_job(&app, &running);
+        job.id
+    };
+    tauri::async_runtime::spawn_blocking(move || plugin_gate_blocking(&plugin_id, job_id, &app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The gate pipeline behind one already-running `plugin-gate:{id}` job —
+/// shared by the command above and the Jobs retry path, so an interrupted
+/// or failed gate reruns instead of dead-ending. Cancellation is honored
+/// before the verdict persists: a cancelled job never changes the trusted
+/// artifact state.
+fn plugin_gate_blocking<R: tauri::Runtime>(
+    plugin_id: &str,
+    job_id: i64,
+    app: &tauri::AppHandle<R>,
+) -> Result<serde_json::Value, String> {
+    let state = app.state::<AppState>();
+    let fail = |error: String| -> String {
+        report_failure(app, &state, job_id, &error);
+        error
+    };
+
+    report_progress(app, &state, job_id, "discover", 10.0).map_err(&fail)?;
+    let plugin = discover_session_plugins(app, &state)
+        .map_err(&fail)?
+        .into_iter()
+        .find(|plugin| plugin.id == plugin_id)
+        .ok_or_else(|| fail(format!("no discovered plugin with id {plugin_id}")))?;
+    // Hash the bytes actually gated, not the discovery-time snapshot: the
+    // verdict must bind to what ran even if the file changed in between.
+    let wasm_bytes = std::fs::read(&plugin.path).map_err(|e| fail(e.to_string()))?;
+    let content_hash = core_prov::content_hash(&wasm_bytes);
+
+    report_progress(app, &state, job_id, "gate", 30.0).map_err(&fail)?;
+    let corpus_path = plugin.path.with_extension("golden.json");
+    let report = match std::fs::read_to_string(&corpus_path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<adapters_plugin_host::gate::GoldenCorpus>(&text)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(corpus) => {
+            let host = adapters_plugin_host::PluginHost::new().map_err(|e| fail(e.to_string()))?;
+            adapters_plugin_host::gate::run_gate(
+                &host,
+                plugin_id,
+                &wasm_bytes,
+                &corpus,
+                adapters_plugin_host::PluginLimits::default(),
+                &gate_source_id(),
+            )
+        }
+        // No corpus, no proof: record the failure instead of erroring, so
+        // the artifact is provably `failed`, not indefinitely `ungated`.
+        Err(error) => adapters_plugin_host::gate::GateReport {
+            passed: false,
+            checks: vec![adapters_plugin_host::gate::GateCheck {
+                name: "corpus-present".to_string(),
+                passed: false,
+                detail: format!("{}: {error}", corpus_path.display()),
+            }],
+        },
+    };
+
+    // A cancel that landed while the gate ran wins outright: the job row
+    // stays cancelled and the verdict is discarded, so the visible job
+    // outcome and the trusted artifact state never diverge (#206 review).
+    if job_cancelled(&state, job_id) {
+        return Err("cancelled".to_string());
+    }
+
+    report_progress(app, &state, job_id, "record", 90.0).map_err(&fail)?;
+    let report_json = serde_json::to_value(&report).map_err(|e| fail(e.to_string()))?;
+    {
+        let mut settings_store = state.settings.lock().map_err(|e| e.to_string())?;
+        settings_store
+            .record_plugin_gate(
+                plugin_id,
+                &content_hash,
+                report.passed,
+                &report_json.to_string(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+    }
+
+    let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+    let job = jobs
+        .finish(job_id, &[format!("gate:{plugin_id}@{content_hash}")])
+        .map_err(|e| e.to_string())?;
+    emit_job(app, &job);
+    if job.status != "done" {
+        return Err("cancelled".to_string());
+    }
+    Ok(report_json)
 }
 
 /// Persist a per-project plugin opt-in/out (#198), bound to the exact
@@ -1549,13 +1721,13 @@ async fn run_class_escalation(
 
 /// Notify the shell of a job transition (`job://changed`); the Jobs surface
 /// and the global progress bar stay live without polling (#117).
-fn emit_job(app: &tauri::AppHandle, job: &Job) {
+fn emit_job<R: tauri::Runtime>(app: &tauri::AppHandle<R>, job: &Job) {
     let _ = app.emit("job://changed", job);
 }
 
 /// Record stage + percent for a running job and notify the shell.
-fn report_progress(
-    app: &tauri::AppHandle,
+fn report_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
     job_id: i64,
     stage: &str,
@@ -1570,7 +1742,12 @@ fn report_progress(
 }
 
 /// Persist a job failure with its detail and notify the shell.
-fn report_failure(app: &tauri::AppHandle, state: &AppState, job_id: i64, error: &str) {
+fn report_failure<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    job_id: i64,
+    error: &str,
+) {
     let Ok(mut jobs) = state.jobs.lock() else {
         return;
     };
@@ -1782,6 +1959,20 @@ fn retry_job_blocking(id: i64, app: tauri::AppHandle) -> Result<Job, String> {
         }
         let path = path.to_string();
         run_ingest(&path, id, &app, &state)?;
+        let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+        return jobs.get(id).map_err(|e| e.to_string());
+    }
+    // A conformance gate re-runs whole (#206 review): the verdict re-binds
+    // to whatever bytes are on disk now, which is exactly what a retry
+    // after an interrupt or a fixed corpus should do.
+    if let Some(plugin_id) = kind.strip_prefix("plugin-gate:") {
+        {
+            let mut jobs = state.jobs.lock().map_err(|e| e.to_string())?;
+            jobs.set_status(id, "running").map_err(|e| e.to_string())?;
+            let running = jobs.get(id).map_err(|e| e.to_string())?;
+            emit_job(&app, &running);
+        }
+        plugin_gate_blocking(plugin_id, id, &app)?;
         let jobs = state.jobs.lock().map_err(|e| e.to_string())?;
         return jobs.get(id).map_err(|e| e.to_string());
     }
@@ -2005,6 +2196,11 @@ fn add_system_blocking(path: String, app: tauri::AppHandle) -> Result<AddSystemS
                 .unwrap_or_default();
             (root, format!("local/{name}"), "workdir".to_string())
         };
+        // Every manifest repo is a resolved ingest root: plugin discovery
+        // scans them like any directly-ingested tree (#198).
+        if let Ok(mut roots) = state.project_roots.lock() {
+            roots.insert(root.display().to_string());
+        }
         // state_json travels with the manifest, so it resolves against the
         // manifest dir — same rule as local repo paths.
         let state_path = entry.state_json.as_ref().map(|p| base.join(p));
@@ -2434,6 +2630,7 @@ fn main() {
             adapter_inventory,
             list_plugins,
             set_plugin_enabled,
+            run_plugin_gate,
             clear_finished_jobs,
             list_jobs,
             list_evals,
@@ -4754,5 +4951,119 @@ export function App() {
         assert!(dossier.contains("FETCHES [Confirmed]"));
         assert!(dossier.contains("SUBSCRIBES [Confirmed]"));
         assert!(dossier.contains("chan:inproc-event:order.placed"));
+    }
+
+    #[test]
+    fn plugin_gate_job_honors_cancel_and_retry_reruns_the_gate() {
+        // #206 review (P2s): a cancelled plugin-gate job must never persist
+        // a verdict — the job outcome and the trusted artifact state cannot
+        // diverge — and Jobs retry re-dispatches the gate on the same row
+        // instead of failing with "not yet supported".
+        use tauri::Manager;
+        const OK_ADAPTER: &[u8] = include_bytes!(
+            "../../crates/adapters-plugin-host/tests/fixtures/compiled/ok-adapter.wasm"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        let adapters = project.join(".cartograph/adapters");
+        std::fs::create_dir_all(&adapters).unwrap();
+        std::fs::write(adapters.join("t0.plugin-fixture.wasm"), OK_ADAPTER).unwrap();
+        // A correct corpus against the fixed gate source id (`golden`).
+        std::fs::write(
+            adapters.join("t0.plugin-fixture.golden.json"),
+            serde_json::json!({
+                "extensions": ["foo"],
+                "cases": [{
+                    "path": "src/lib.rs",
+                    "source": "hello world",
+                    "nodes": [
+                        {"id": "golden:src/lib.rs", "label": "TestNode", "props": {"len": 11}}
+                    ],
+                    "edges": [{
+                        "src": "golden:src/lib.rs",
+                        "dst": "golden:src/lib.rs",
+                        "label": "SELF",
+                        "props": {}
+                    }],
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let state_path = dir.path().join("state.db");
+        let mut roots = std::collections::BTreeSet::new();
+        roots.insert(project.display().to_string());
+        app.manage(super::AppState {
+            graph: std::sync::Mutex::new(
+                SqliteGraphStore::open(dir.path().join("graph.db")).unwrap(),
+            ),
+            jobs: std::sync::Mutex::new(super::JobStore::open(&state_path).unwrap()),
+            findings: std::sync::Mutex::new(super::FindingStore::open(&state_path).unwrap()),
+            settings: std::sync::Mutex::new(
+                super::settings::SettingsStore::open(&state_path).unwrap(),
+            ),
+            decisions: std::sync::Mutex::new(agents::DecisionLog::open(&state_path).unwrap()),
+            extraction_caches: std::sync::Mutex::new(super::ExtractionCaches::default()),
+            project_roots: std::sync::Mutex::new(roots),
+            metrics: std::sync::Mutex::new(
+                super::metrics::MetricsStore::open(&state_path).unwrap(),
+            ),
+        });
+        let handle = app.handle().clone();
+        let state = app.state::<super::AppState>();
+        let hash = core_prov::content_hash(OK_ADAPTER);
+
+        // Enqueue a gate job, then cancel before the pipeline runs.
+        let job_id = {
+            let mut jobs = state.jobs.lock().unwrap();
+            let job = jobs.enqueue("plugin-gate:t0.plugin-fixture").unwrap();
+            jobs.set_status(job.id, "running").unwrap();
+            jobs.cancel(job.id).unwrap();
+            job.id
+        };
+        let result = super::plugin_gate_blocking("t0.plugin-fixture", job_id, &handle);
+        assert_eq!(result.unwrap_err(), "cancelled");
+        // The cancel won outright: no verdict, job row still cancelled.
+        assert!(
+            state
+                .settings
+                .lock()
+                .unwrap()
+                .plugin_gate("t0.plugin-fixture", &hash)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.jobs.lock().unwrap().get(job_id).unwrap().status,
+            "cancelled"
+        );
+
+        // Retry re-queues the same durable row and re-dispatches the gate
+        // (the `plugin-gate:` branch of retry_job_blocking runs exactly
+        // this sequence over the same helper).
+        {
+            let mut jobs = state.jobs.lock().unwrap();
+            jobs.retry(job_id).unwrap();
+            jobs.set_status(job_id, "running").unwrap();
+        }
+        super::plugin_gate_blocking("t0.plugin-fixture", job_id, &handle)
+            .expect("retried gate runs");
+        assert_eq!(
+            state.jobs.lock().unwrap().get(job_id).unwrap().status,
+            "done"
+        );
+        let (passed, report_json) = state
+            .settings
+            .lock()
+            .unwrap()
+            .plugin_gate("t0.plugin-fixture", &hash)
+            .unwrap()
+            .expect("retried gate persists its verdict");
+        assert!(passed, "gate report: {report_json}");
     }
 }

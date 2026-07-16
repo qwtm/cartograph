@@ -8,7 +8,7 @@
 //! deterministic tier is always on and never invokes an LLM, so there is
 //! nothing to configure or disable.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::path::Path;
 
@@ -112,6 +112,14 @@ impl SettingsStore {
                  updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                  PRIMARY KEY (project_root, plugin_id)
              ) STRICT;
+             CREATE TABLE IF NOT EXISTS plugin_gates (
+                 plugin_id    TEXT NOT NULL,
+                 content_hash TEXT NOT NULL,
+                 passed       INTEGER NOT NULL CHECK (passed IN (0, 1)),
+                 report_json  TEXT NOT NULL,
+                 updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                 PRIMARY KEY (plugin_id, content_hash)
+             ) STRICT;
              CREATE TABLE IF NOT EXISTS egress_log (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  provider   TEXT NOT NULL,
@@ -167,8 +175,6 @@ impl SettingsStore {
         Ok(())
     }
 
-    /// Choose `local` or `cloud` for an LLM tier (T2/T3). Switching away
-    /// from cloud always revokes any standing consent (fail closed).
     /// Enable/disable one discovered plugin for one project (#198).
     /// Discovery never activates anything by itself: a plugin is off until
     /// this records an explicit opt-in, per project — and the opt-in binds
@@ -205,6 +211,48 @@ impl SettingsStore {
         rows.collect()
     }
 
+    /// Persist one conformance-gate outcome (#200), keyed by the exact
+    /// artifact hash the gate actually ran: replaced bytes are ungated
+    /// again, no matter what an earlier copy proved.
+    pub fn record_plugin_gate(
+        &mut self,
+        plugin_id: &str,
+        content_hash: &str,
+        passed: bool,
+        report_json: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO plugin_gates (plugin_id, content_hash, passed, report_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (plugin_id, content_hash)
+             DO UPDATE SET passed = ?3,
+                           report_json = ?4,
+                           updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')",
+            params![plugin_id, content_hash, passed as i64, report_json],
+        )?;
+        Ok(())
+    }
+
+    /// The recorded gate outcome for one exact artifact:
+    /// `Some((passed, report_json))`, or `None` while ungated — the
+    /// proposed state every artifact starts in.
+    pub fn plugin_gate(
+        &self,
+        plugin_id: &str,
+        content_hash: &str,
+    ) -> rusqlite::Result<Option<(bool, String)>> {
+        self.conn
+            .query_row(
+                "SELECT passed, report_json FROM plugin_gates
+                 WHERE plugin_id = ?1 AND content_hash = ?2",
+                params![plugin_id, content_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// Choose `local` or `cloud` for an LLM tier (T2/T3). Switching away
+    /// from cloud always revokes any standing consent (fail closed).
     pub fn set_provider(&mut self, tier: &str, provider: &str) -> Result<(), SettingsError> {
         self.require_tier(tier)?;
         if !LLM_TIERS.contains(&tier) {
@@ -373,6 +421,41 @@ mod tests {
         assert_eq!(
             store.enabled_plugins("/proj/b").unwrap(),
             [("t0.adapter-ruby".to_string(), "hash-4".to_string())]
+        );
+    }
+
+    #[test]
+    fn plugin_gate_outcome_binds_to_the_exact_artifact() {
+        // AC-0068 (#200): a gate verdict is stored per (plugin, artifact
+        // hash). Unknown pairs are ungated — the proposed state — and
+        // replaced bytes never inherit an earlier pass.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = super::SettingsStore::open(dir.path().join("state.db")).unwrap();
+        assert_eq!(
+            store.plugin_gate("t0.adapter-ruby", "hash-1").unwrap(),
+            None
+        );
+
+        store
+            .record_plugin_gate("t0.adapter-ruby", "hash-1", true, r#"{"passed":true}"#)
+            .unwrap();
+        assert_eq!(
+            store.plugin_gate("t0.adapter-ruby", "hash-1").unwrap(),
+            Some((true, r#"{"passed":true}"#.to_string()))
+        );
+        // Different bytes of the same plugin id: still ungated.
+        assert_eq!(
+            store.plugin_gate("t0.adapter-ruby", "hash-2").unwrap(),
+            None
+        );
+
+        // A rerun overwrites the verdict for that exact artifact.
+        store
+            .record_plugin_gate("t0.adapter-ruby", "hash-1", false, r#"{"passed":false}"#)
+            .unwrap();
+        assert_eq!(
+            store.plugin_gate("t0.adapter-ruby", "hash-1").unwrap(),
+            Some((false, r#"{"passed":false}"#.to_string()))
         );
     }
 

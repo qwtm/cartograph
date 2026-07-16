@@ -78,6 +78,7 @@ export default function App() {
     adapters,
     plugins,
     setPluginEnabled,
+    runPluginGate,
     specBundle,
     specMode,
     curation,
@@ -441,6 +442,7 @@ export default function App() {
             adapters={adapters}
             plugins={plugins}
             onTogglePlugin={(plugin, enabled) => void setPluginEnabled(plugin, enabled)}
+            onRunGate={(plugin) => void runPluginGate(plugin)}
             error={settingsError}
             canEdit={backend === 'up'}
             onToggleTier={(tier, enabled) => void setTierEnabled(tier, enabled)}

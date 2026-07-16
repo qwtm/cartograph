@@ -11,6 +11,8 @@ export interface SettingsSurfaceProps {
   /** Discovered WASM plugin adapters with per-project enablement (#198). */
   plugins?: PluginStatus[];
   onTogglePlugin?: (plugin: PluginStatus, enabled: boolean) => void;
+  /** Run the durable conformance-gate job for one plugin (#200). */
+  onRunGate?: (plugin: PluginStatus) => void;
   error: string | null;
   /** Disabled controls when there is no live backend to persist into. */
   canEdit: boolean;
@@ -137,6 +139,7 @@ export function SettingsSurface({
   adapters,
   plugins,
   onTogglePlugin,
+  onRunGate,
   error,
   canEdit,
   onToggleTier,
@@ -321,7 +324,9 @@ export function SettingsSurface({
         WASM adapter plugins found in the project's <code>.cartograph/adapters/</code> (which wins
         on id conflict) and the user-level adapters directory, keyed by content hash. A plugin is
         off until you enable it here, and it only extracts facts after passing the conformance
-        gate — never on discovery.
+        gate — never on discovery. The gate proves the SPI contract under the standard bounds,
+        the plugin's own golden corpus, and double-run determinism; anything less stays
+        proposed.
       </p>
       {plugins && plugins.length > 0 ? (
         <ul className="adapter-list" aria-label="Discovered plugins">
@@ -329,6 +334,21 @@ export function SettingsSurface({
             <li key={plugin.id} className="adapter-row">
               <div className="adapter-head">
                 <strong>{plugin.id}</strong>
+                <span
+                  className={`gate-chip gate-${plugin.gate}`}
+                  data-testid={`gate-${plugin.id}`}
+                >
+                  {plugin.gate === 'passed' && 'Gate passed'}
+                  {plugin.gate === 'failed' && 'Gate failed'}
+                  {plugin.gate === 'ungated' && 'Proposed — gate not run'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRunGate?.(plugin)}
+                  aria-label={`Run conformance gate for ${plugin.id}`}
+                >
+                  Run conformance gate
+                </button>
                 <button
                   type="button"
                   role="switch"
@@ -344,6 +364,9 @@ export function SettingsSurface({
                 {plugin.shadowed_user_copy ? ' (shadows a user-level copy)' : ''} ·{' '}
                 <code>{plugin.content_hash.slice(0, 12)}</code>
               </p>
+              {plugin.gate === 'failed' && plugin.gate_detail && (
+                <p className="error-text">{plugin.gate_detail}</p>
+              )}
             </li>
           ))}
         </ul>
