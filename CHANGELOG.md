@@ -1,5 +1,12 @@
 # cartograph
 
+## 0.5.0
+
+### Minor Changes
+
+- de05df5: Flow Inspector now traces real targets beyond web apps: extension contexts (popup, background, content scripts) and manifest keyboard commands anchor their own flows, walking from the manifest entry into the entry file's symbols and across message channels. When zero flows trace, the Inspector names every anchor kind recovery looked for and what it found instead of a generic hint.
+- 3c09551: The gap register triages by cause at scale: past a screenful, the System-gaps lane groups gaps into cause classes (stop reason × extractor) ranked by instance count — thousands of gaps read as a handful of causes. Each class expands on demand to paged instance rows that stay responsive, and every instance keeps its Resolution Strategy path.
+
 ## 0.4.0
 
 ### Minor Changes
