@@ -373,15 +373,18 @@ class WrongController {
 }
 
 // AC-0098: named Spring imports (including `path =` named arguments) prove
-// mappings, and a template-string path is a runtime identity that is not
-// asserted.
+// mappings; a mapping whose path argument is present but not a provable
+// literal (a `$` template, a constant reference) is a runtime identity —
+// it becomes an explicit route Gap, never a Confirmed endpoint with a
+// guessed, interpolated, or defaulted path (#218 review).
 #[test]
-fn named_spring_imports_prove_mappings_and_templates_are_not_asserted() {
+fn named_spring_imports_prove_mappings_and_dynamic_paths_gap() {
     let source = br#"package com.demo.web
 
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PostMapping
 
 @RestController
 class AdminController {
@@ -390,6 +393,9 @@ class AdminController {
 
     @GetMapping("/admin/$suffix")
     fun dynamic(): String = "d"
+
+    @PostMapping(path = ROUTE)
+    fun constant(): String = "c"
 }
 "#;
     let path = "src/main/kotlin/com/demo/web/AdminController.kt";
@@ -400,14 +406,105 @@ class AdminController {
         endpoint.props["handler_sym"],
         format!("sym:{}@{path}#AdminController.purge", "local/demo")
     );
-    // The interpolated @GetMapping path resolves to the bare mapping route
-    // (no literal), never a fabricated template path.
-    assert!(
+    // The literal mapping is the only Confirmed endpoint: the template and
+    // constant-reference paths must not surface as endpoints at all — not
+    // interpolated, not collapsed to the class base or "/".
+    assert_eq!(
         out.nodes
             .iter()
             .filter(|node| node.label == "Endpoint")
-            .all(|node| !node.props["path"].as_str().unwrap().contains('$'))
+            .count(),
+        1
     );
+    // Each unprovable mapping is an explicit Gap that still names its
+    // handler, so the partial fact is visible rather than silently absent.
+    let gaps: Vec<_> = out
+        .nodes
+        .iter()
+        .filter(|node| node.label == "Gap")
+        .collect();
+    assert_eq!(gaps.len(), 2);
+    for (gap, method, handler) in [
+        (gaps[0], "GET", "AdminController.dynamic"),
+        (gaps[1], "POST", "AdminController.constant"),
+    ] {
+        assert_eq!(gap.props["reason"], "dynamic Spring mapping path");
+        assert_eq!(gap.props["method"], method);
+        assert_eq!(
+            gap.props["handler_sym"],
+            format!("sym:local/demo@{path}#{handler}")
+        );
+        assert_eq!(gap.props["prov"]["confidence_tier"], "Gap");
+        edge(
+            &out.edges,
+            &gap.id,
+            &format!("sym:local/demo@{path}#{handler}"),
+            "HANDLES",
+        );
+    }
+}
+
+// AC-0098 (#218 review): a *class-level* @RequestMapping whose path is a
+// runtime identity poisons every mapping beneath it — even fully literal
+// method paths cannot compose into a Confirmed route, so each one fails
+// closed to a route Gap. An argument list with no path-designating
+// argument, by contrast, is Spring's own documented default ("") and
+// composes normally.
+#[test]
+fn dynamic_class_base_paths_fail_closed_and_non_path_arguments_default() {
+    let source = br#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+@RequestMapping(BASE)
+class DynController {
+    @GetMapping("/literal")
+    fun get(): String = "g"
+}
+"#;
+    let out = extract_source(
+        source,
+        "src/main/kotlin/com/demo/web/DynController.kt",
+        &id(),
+    )
+    .unwrap();
+    assert_eq!(
+        out.nodes
+            .iter()
+            .filter(|node| node.label == "Endpoint")
+            .count(),
+        0
+    );
+    let gap = out
+        .nodes
+        .iter()
+        .find(|node| node.label == "Gap")
+        .expect("dynamic base gap");
+    assert_eq!(gap.props["reason"], "dynamic Spring mapping path");
+
+    // Named non-path arguments (produces, consumes, …) do not designate a
+    // path: the mapping keeps Spring's default "" and composes Confirmed.
+    let defaulted = br#"package com.demo.web
+
+import org.springframework.web.bind.annotation.*
+
+@RestController
+@RequestMapping("/api")
+class JsonController {
+    @GetMapping(produces = "application/json")
+    fun all(): String = "[]"
+}
+"#;
+    let out = extract_source(
+        defaulted,
+        "src/main/kotlin/com/demo/web/JsonController.kt",
+        &id(),
+    )
+    .unwrap();
+    let endpoint = node(&out.nodes, "ep:local/demo@GET:/api");
+    assert_eq!(endpoint.props["path"], "/api");
+    assert!(!out.nodes.iter().any(|node| node.label == "Gap"));
 }
 
 // AC-0098: content-identical files are reused from the incremental cache

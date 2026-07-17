@@ -253,12 +253,28 @@ fn parse_imports(
     imports
 }
 
+/// A mapping annotation's path argument, three-way. "No argument" and
+/// "argument present but unprovable" are different facts: an absent path
+/// is Spring's own documented default (`""`), while a present-but-dynamic
+/// one (a `$` template, a constant reference, any non-literal expression)
+/// is a runtime identity T0 cannot confirm — it must fail closed, never
+/// collapse to the default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathArg {
+    /// No path-designating argument: Spring defaults the path to `""`.
+    Absent,
+    /// A provable string literal.
+    Literal(String),
+    /// A path argument exists but is not a provable literal.
+    Dynamic,
+}
+
 /// One recognized annotation use: simple name, the node carrying its
-/// evidence span, and its literal path argument when one is provable.
+/// evidence span, and its path argument.
 struct AnnotationUse<'t> {
     simple: String,
     node: TsNode<'t>,
-    literal_path: Option<String>,
+    path: PathArg,
 }
 
 /// A string literal with no interpolation — `"/api/users"` yes,
@@ -284,10 +300,12 @@ fn pure_string_literal(cx: &FileCx<'_>, node: TsNode<'_>) -> Option<String> {
     Some(text)
 }
 
-/// The literal path argument of a mapping annotation's `value_arguments`:
-/// a bare string, or a `value =` / `path =` pair. Anything non-literal is
-/// not asserted.
-fn arguments_literal_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> Option<String> {
+/// The path argument of a mapping annotation's `value_arguments`: a bare
+/// (positional) argument, or a `value =` / `path =` pair. A found argument
+/// that is not a pure string literal is [`PathArg::Dynamic`] — present but
+/// unprovable; other named arguments (`produces = …`, `method = …`) do not
+/// designate a path and leave it [`PathArg::Absent`].
+fn arguments_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> PathArg {
     let mut walk = arguments.walk();
     for argument in arguments.named_children(&mut walk) {
         if argument.kind() != "value_argument" {
@@ -298,20 +316,28 @@ fn arguments_literal_path(cx: &FileCx<'_>, arguments: TsNode<'_>) -> Option<Stri
             argument.named_children(&mut inner).collect()
         };
         match children.as_slice() {
-            [value] => return pure_string_literal(cx, *value),
+            [value] => {
+                return match pure_string_literal(cx, *value) {
+                    Some(literal) => PathArg::Literal(literal),
+                    None => PathArg::Dynamic,
+                };
+            }
             [key, value] if key.kind() == "identifier" => {
                 if matches!(cx.text(key), "value" | "path") {
-                    return pure_string_literal(cx, *value);
+                    return match pure_string_literal(cx, *value) {
+                        Some(literal) => PathArg::Literal(literal),
+                        None => PathArg::Dynamic,
+                    };
                 }
             }
             _ => {}
         }
     }
-    None
+    PathArg::Absent
 }
 
 /// Interpret one grammar `annotation` node: the simple name comes from the
-/// last segment of its `user_type`, the literal path from its
+/// last segment of its `user_type`, the path argument from its
 /// `constructor_invocation` arguments when present.
 fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<AnnotationUse<'t>> {
     let mut walk = annotation.walk();
@@ -323,13 +349,13 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
                 return Some(AnnotationUse {
                     simple: simple.to_string(),
                     node: annotation,
-                    literal_path: None,
+                    path: PathArg::Absent,
                 });
             }
             "constructor_invocation" => {
                 let mut inner = child.walk();
                 let mut simple = None;
-                let mut literal_path = None;
+                let mut path = PathArg::Absent;
                 for part in child.named_children(&mut inner) {
                     match part.kind() {
                         "user_type" => {
@@ -337,14 +363,14 @@ fn read_annotation<'t>(cx: &FileCx<'_>, annotation: TsNode<'t>) -> Option<Annota
                             simple =
                                 Some(name.rsplit('.').next().unwrap_or(name).trim().to_string());
                         }
-                        "value_arguments" => literal_path = arguments_literal_path(cx, part),
+                        "value_arguments" => path = arguments_path(cx, part),
                         _ => {}
                     }
                 }
                 return simple.map(|simple| AnnotationUse {
                     simple,
                     node: annotation,
-                    literal_path,
+                    path,
                 });
             }
             _ => {}
@@ -407,16 +433,23 @@ fn preceding_expression_annotations<'t>(
                     }
                     "annotated_expression" => next_level = Some(child),
                     "parenthesized_expression" => {
+                        // The wrapped expression is the innermost
+                        // annotation's argument: a pure literal is its
+                        // path, anything else is a present-but-dynamic
+                        // argument that must not collapse to the default.
                         let literal = {
                             let mut inner = child.walk();
                             child
                                 .named_children(&mut inner)
                                 .find_map(|expr| pure_string_literal(cx, expr))
                         };
-                        if let (Some(literal), Some(last)) = (literal, found.last_mut())
-                            && last.literal_path.is_none()
+                        if let Some(last) = found.last_mut()
+                            && last.path == PathArg::Absent
                         {
-                            last.literal_path = Some(literal);
+                            last.path = match literal {
+                                Some(literal) => PathArg::Literal(literal),
+                                None => PathArg::Dynamic,
+                            };
                         }
                     }
                     _ => {}
@@ -682,7 +715,28 @@ pub fn extract_source(
         let Some(function) = name_node.parent() else {
             continue;
         };
-        let name = cx.text(&name_node).to_string();
+        let mut name = cx.text(&name_node).to_string();
+        if name.is_empty() {
+            // Grammar quirk (verify-at-build, #212): a function named by a
+            // soft keyword (`fun dynamic()`, legal Kotlin) lexes as that
+            // anonymous keyword token followed by an *empty* identifier.
+            // Recover the name from the directly adjacent token; a
+            // function whose name still cannot be proven is skipped
+            // entirely — never an empty-named Symbol.
+            name = name_node
+                .prev_sibling()
+                .filter(|prev| !prev.is_named() && prev.end_byte() == name_node.start_byte())
+                .map(|prev| cx.text(&prev).to_string())
+                .filter(|text| {
+                    !text.is_empty()
+                        && text.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !text.starts_with(|c: char| c.is_ascii_digit())
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+        }
         let chain = enclosing_type_chain(&cx, function);
         let receiver = extension_receiver(&cx, function, name_node);
         let local_name = match &receiver {
@@ -758,13 +812,19 @@ pub fn extract_source(
         if !is_controller {
             continue;
         }
-        let base = class_annotations
-            .iter()
-            .find(|annotation| {
-                annotation.simple == "RequestMapping" && spring_proven(&annotation.simple, &imports)
-            })
-            .and_then(|annotation| annotation.literal_path.clone())
-            .unwrap_or_default();
+        // "No @RequestMapping" and "@RequestMapping with no path argument"
+        // both mean Spring's default base (""); a present-but-dynamic base
+        // poisons every mapping under it (None), failing them closed.
+        let base = match class_annotations.iter().find(|annotation| {
+            annotation.simple == "RequestMapping" && spring_proven(&annotation.simple, &imports)
+        }) {
+            None => Some(String::new()),
+            Some(annotation) => match &annotation.path {
+                PathArg::Absent => Some(String::new()),
+                PathArg::Literal(path) => Some(path.clone()),
+                PathArg::Dynamic => None,
+            },
+        };
         for annotation in declaration_annotations(&cx, *function) {
             let Some(http_method) = mapping_method(&annotation.simple) else {
                 continue;
@@ -772,7 +832,55 @@ pub fn extract_source(
             if !spring_proven(&annotation.simple, &imports) {
                 continue;
             }
-            let tail = annotation.literal_path.clone().unwrap_or_default();
+            let tail = match &annotation.path {
+                PathArg::Absent => Some(String::new()),
+                PathArg::Literal(path) => Some(path.clone()),
+                PathArg::Dynamic => None,
+            };
+            let (Some(base), Some(tail)) = (base.clone(), tail) else {
+                // The mapping is proven but its route is a runtime
+                // identity (template/constant/expression path, on the
+                // method or the class base). T0 cannot confirm the route,
+                // so the endpoint is an explicit Gap, never a guessed or
+                // default path presented as Confirmed (R-INT-4).
+                let gap_id = format!(
+                    "gap:route:{}@{}@{}",
+                    id.repo,
+                    path,
+                    annotation.node.start_byte()
+                );
+                out.nodes.push(Node {
+                    id: gap_id.clone(),
+                    label: "Gap".into(),
+                    props: serde_json::json!({
+                        "method": http_method,
+                        "handler_sym": handler,
+                        "framework": "spring",
+                        "language": "kotlin",
+                        "reason": "dynamic Spring mapping path",
+                        "attempted_tiers": ["T0"],
+                        "prov": cx.prov_with_confidence(
+                            &annotation.node,
+                            ConfidenceTier::Gap,
+                            &format!("Gap {gap_id}"),
+                        ),
+                    }),
+                });
+                out.edges.push(Edge {
+                    src: gap_id.clone(),
+                    dst: handler.clone(),
+                    label: "HANDLES".into(),
+                    props: serde_json::json!({
+                        "attempted_resolution": "literal-path",
+                        "prov": cx.prov_with_confidence(
+                            &annotation.node,
+                            ConfidenceTier::Gap,
+                            &format!("HANDLES {gap_id} -> {handler}"),
+                        ),
+                    }),
+                });
+                continue;
+            };
             let route = join_route(&base, &tail);
             let endpoint = format!("ep:{}@{http_method}:{route}", id.repo);
             out.nodes.push(Node {
