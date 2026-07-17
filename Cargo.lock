@@ -38,6 +38,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapters-lang-kotlin"
+version = "0.9.0"
+dependencies = [
+ "core-graph",
+ "core-prov",
+ "serde_json",
+ "streaming-iterator",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tree-sitter",
+ "tree-sitter-kotlin-ng",
+]
+
+[[package]]
 name = "adapters-lang-python"
 version = "0.9.0"
 dependencies = [
@@ -172,6 +186,7 @@ version = "0.9.0"
 dependencies = [
  "adapters-lang-go",
  "adapters-lang-java",
+ "adapters-lang-kotlin",
  "adapters-lang-python",
  "adapters-lang-ts",
  "adapters-plugin-host",
@@ -4833,6 +4848,16 @@ name = "tree-sitter-java"
 version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-kotlin-ng"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450"
 dependencies = [
  "cc",
  "tree-sitter-language",
