@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn parses_compiler_options_and_paths() {
         let facts = parse(
-            r#"{
+            r##"{
   "compilerOptions": {
     "target": "ES2022",
     "moduleResolution": "nodenext",
@@ -169,7 +169,7 @@ mod tests {
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"], "#lib": ["lib/index.ts"] }
   }
-}"#,
+}"##,
         );
         assert_eq!(facts.settings["strict"], serde_json::json!(true));
         assert_eq!(facts.base_url.as_deref(), Some("."));
@@ -197,7 +197,10 @@ mod tests {
 }"#;
         let facts = parse(text);
         assert_eq!(facts.settings["strict"], serde_json::json!(true));
-        assert_eq!(facts.paths, vec![("@/*".to_string(), vec!["src/*".to_string()])]);
+        assert_eq!(
+            facts.paths,
+            vec![("@/*".to_string(), vec!["src/*".to_string()])]
+        );
         let (start, end) = facts.paths_span;
         assert_eq!(&text[start as usize..end as usize], "\"paths\"");
     }

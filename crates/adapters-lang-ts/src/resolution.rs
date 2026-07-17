@@ -235,7 +235,9 @@ fn apply_pattern(pattern: &str, target: &str, spec: &str) -> Option<String> {
 fn prove_candidate(candidate: &str, repo: &str, known_files: &HashSet<String>) -> Option<String> {
     let file_id = |rel: &str| format!("file:{repo}@{rel}");
     if SOURCE_EXTENSIONS.iter().any(|ext| candidate.ends_with(ext)) {
-        return known_files.contains(&file_id(candidate)).then(|| candidate.to_string());
+        return known_files
+            .contains(&file_id(candidate))
+            .then(|| candidate.to_string());
     }
     for ext in SOURCE_EXTENSIONS {
         let with_ext = format!("{candidate}{ext}");
@@ -270,12 +272,12 @@ fn resolve_spec(
 ) -> Option<Resolved> {
     // tsconfig scopes: most specific directory containing the importer wins.
     for scope in &index.tsconfigs {
-        let governs = scope.dir.is_empty()
-            || importer.starts_with(&format!("{}/", scope.dir));
+        let governs = scope.dir.is_empty() || importer.starts_with(&format!("{}/", scope.dir));
         if !governs {
             continue;
         }
         let base = match &scope.base_url {
+            Some(base_url) if scope.dir.is_empty() => normalize(base_url),
             Some(base_url) => normalize(&format!("{}/{}", scope.dir, base_url)),
             None => scope.dir.clone(),
         };

@@ -464,8 +464,7 @@ fn resolve_relative(from: &str, spec: &str) -> Option<String> {
 /// resolution requires imports to spell the *emitted* extension, so
 /// `import './foo.js'` conventionally means the `foo.ts`/`foo.tsx` sitting
 /// in the tree. Tried only when the spelled file does not itself exist.
-const NODENEXT_SIBLINGS: &[(&str, &[&str])] =
-    &[(".js", &[".ts", ".tsx"]), (".jsx", &[".tsx"])];
+const NODENEXT_SIBLINGS: &[(&str, &[&str])] = &[(".js", &[".ts", ".tsx"]), (".jsx", &[".tsx"])];
 
 /// Correct one id built from an import specifier, once every real
 /// file/symbol in the directory is known. `id` is either a
@@ -2391,6 +2390,12 @@ pub fn extract_dir_incremental_with_progress(
         .map(|node| node.id.clone())
         .collect();
     reconcile_guessed_edge_targets(&mut out.edges, &known_files, &known_symbols);
+    // Config-driven bare-specifier resolution (#213): tsconfig paths/baseUrl
+    // and workspace-package names rewrite `mod:` IMPORTS targets to real
+    // files, citing the deciding config. Reads configs fresh on every walk —
+    // a tsconfig edit must take effect even when every source parse is
+    // cache-reused.
+    resolution::resolve_bare_imports(&mut out, root, id, &known_files)?;
     for mut pending in std::mem::take(&mut out.pending_calls) {
         if let Some(real) = reconcile_guessed_extension(&pending.resolved_edge.dst, &known_symbols)
         {
@@ -2570,6 +2575,7 @@ fn collect_ts_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::
 pub mod chrome_messaging;
 pub(crate) mod const_resolution;
 pub mod indexeddb;
+pub(crate) mod resolution;
 pub mod webextension;
 
 #[cfg(test)]
