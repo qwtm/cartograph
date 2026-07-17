@@ -27,7 +27,7 @@
 - **Performance:** Shallow/sparse clone; 1 GB repo clones within bounded progress feedback.
 - **Trace:** M0–M3 · `ingest`, `core-graph`, `app`, `ui` · — · T-0001..0003,T-0049..0050,T-0076..0078,T-0085,T-0094
 
-### US-0002 — Deterministic extraction of server-side facts (TS/JS/Python/Go/Java)
+### US-0002 — Deterministic extraction of server-side facts (TS/JS/Python/Go/Java/Kotlin)
 - **Actor:** Engine
 - **As a** engineer **I want** import/call graphs, endpoints, and data access extracted statically **so that** server facts are Confirmed without inference.
 - **Priority:** Must · **Status:** In-Progress
@@ -39,9 +39,10 @@
 - **AC-0079** Given a Java repository, when it is ingested, then classes/interfaces/enums/records and methods become Confirmed T0 Symbols with exact evidence spans, same-class and import-proven cross-file calls are joined deterministically repo-wide, a declared-package import whose target cannot be proven fails closed to an explicit Gap, foreign-package imports assert nothing, and the ingest summary reports Java separately.
 - **AC-0080** Given Java that import-proves Spring Web annotations (named or wildcard `org.springframework.*` imports), when a `@RestController`/`@Controller` class is parsed, then `@{Get,Post,Put,Delete,Patch}Mapping` methods become Confirmed Endpoints with class-level `@RequestMapping` path composition and HANDLES edges to their handler methods; lookalike annotations without the proving import produce no endpoints.
 - **AC-0095** Given a `.js`/`.jsx`/`.mjs`/`.cjs` repo, when ingested, then the same TypeScript-crate grammar recovers Confirmed T0 File/Symbol/IMPORTS/CALLS facts and Express/Next/React-Router endpoints and screens as it does for `.ts`/`.tsx` (no separate JS adapter, and Preflight/Settings report JavaScript as installed rather than a requestable planned adapter); an extensionless relative import resolves to the real file and symbol regardless of its actual source extension once the whole directory is known, rather than a phantom `.ts`-guessed placeholder.
+- **AC-0098** Given a Kotlin repository (`.kt`/`.kts`), when it is ingested, then classes, interfaces, objects, data classes, enums, and functions (top-level, member, and extension) become Confirmed T0 Symbols with exact evidence spans; same-scope and import-proven cross-file calls (type/object receivers and imported top-level functions) are joined deterministically repo-wide, with a declared-package import whose target cannot be proven — or is declared ambiguously more than once — failing closed to an explicit Gap, foreign packages and unproven receivers asserting nothing; import-proven Spring Web annotations compose class-level `@RequestMapping` with `@{Get,Post,Put,Delete,Patch}Mapping` into Confirmed Endpoint/HANDLES facts (lookalikes without the proving import produce no endpoints); Preflight/Settings report Kotlin as installed (`t0.adapter-kotlin`) rather than a requestable planned adapter; and the ingest summary reports Kotlin separately.
 - **Security:** No code leaves device at T0.
 - **Performance:** Incremental tree-sitter parse; re-parse only changed files by `content_hash`.
-- **Trace:** M1,M10 · `adapters-lang-ts`, `adapters-lang-python`, `adapters-lang-go`, `adapters-lang-java`, `adapters-fw`, `core-prov`, `app`, `ui` · — · T-0004..0006,T-0053..0054,T-0079..0080,T-0095
+- **Trace:** M1,M10 · `adapters-lang-ts`, `adapters-lang-python`, `adapters-lang-go`, `adapters-lang-java`, `adapters-lang-kotlin`, `adapters-fw`, `core-prov`, `app`, `ui` · — · T-0004..0006,T-0053..0054,T-0079..0080,T-0095,T-0098
 
 ### US-0003 — IaC resource graph + cloud capability resolution (Terraform/Pulumi/AWS)
 - **Actor:** Engine

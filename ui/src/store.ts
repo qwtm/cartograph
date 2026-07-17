@@ -80,6 +80,7 @@ export interface IngestSummary {
     go: LayerSummary;
     tf: LayerSummary;
     java: LayerSummary;
+    kotlin: LayerSummary;
     webext: LayerSummary;
   };
   delta?: {
