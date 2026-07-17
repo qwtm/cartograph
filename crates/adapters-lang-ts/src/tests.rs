@@ -1140,3 +1140,617 @@ const queue = new aws.sqs.Queue('orders', {});
     let ex = extract_source(source.as_bytes(), "lookalike.ts", &id()).unwrap();
     assert!(ex.nodes.iter().all(|node| node.label != "Resource"));
 }
+
+// --- Literal eval()/new Function() extraction (#214, AC-0099) ---------------
+
+// A string-literal eval() is compile-time-known: its Symbols and CALLS are
+// Confirmed T0, cite the string's span at the eval site, carry `via: "eval"`,
+// and the enclosing symbol CALLS the extracted code's entry symbol so the
+// flow tracer walks through the eval boundary. (T-0099)
+#[test]
+fn literal_eval_extracts_facts_with_eval_site_provenance() {
+    let src = r#"
+export function boot() {
+  eval("function setup() { registerLegacy(); } function registerLegacy() {} setup();");
+}
+"#;
+    let ex = extract_source(src.as_bytes(), "src/boot.ts", &id()).unwrap();
+    let calls = edge_pairs(&ex, "CALLS");
+    let entry = calls
+        .iter()
+        .find(|(s, d)| {
+            *s == "sym:qwtm/example@src/boot.ts#boot"
+                && d.starts_with("sym:qwtm/example@src/boot.ts#eval@")
+        })
+        .expect("containment CALLS into the eval entry symbol")
+        .1;
+    // Eval-recovered symbols are namespaced under the entry (#217 review).
+    let setup_id = format!("{entry}.setup");
+    let register_id = format!("{entry}.registerLegacy");
+    let setup = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == setup_id)
+        .expect("eval-defined symbol");
+    assert_eq!(setup.props["via"], "eval");
+    assert_eq!(setup.props["prov"]["tier"], "Deterministic");
+    assert_eq!(setup.props["prov"]["confidence_tier"], "Confirmed");
+    // Evidence cites the string literal's span at the eval site — the
+    // code's true source location.
+    let ev = &setup.props["prov"]["evidence"][0];
+    let span = &src
+        [ev["byte_start"].as_u64().unwrap() as usize..ev["byte_end"].as_u64().unwrap() as usize];
+    assert!(
+        span.starts_with("\"function setup()"),
+        "cites the string at the eval site: {span}"
+    );
+
+    assert!(calls.contains(&(entry, setup_id.as_str())));
+    assert!(calls.contains(&(setup_id.as_str(), register_id.as_str())));
+    let entry_node = ex.nodes.iter().find(|n| n.id == entry).expect("entry node");
+    assert_eq!(entry_node.props["via"], "eval");
+    assert!(
+        entry_node.props["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("<eval@")
+    );
+    // The site is classified covered — preflight closes its finding.
+    assert_eq!(
+        ex.eval_sites,
+        vec![EvalSite {
+            path: "src/boot.ts".into(),
+            line: 3,
+            proof: EvalProof::Covered,
+        }]
+    );
+}
+
+// #217 review: an eval-defined symbol that shares its name with a real
+// outer symbol is a different declaration — the store upserts nodes by id,
+// so the eval-recovered fact must live under the site's namespace instead
+// of merging with (and clobbering) the outer one. (T-0099)
+#[test]
+fn eval_defined_symbols_never_clobber_same_named_outer_symbols() {
+    let src = r#"
+function setup() {}
+export function boot() {
+  setup();
+  eval("function setup() {} setup();");
+}
+"#;
+    let ex = extract_source(src.as_bytes(), "src/app.ts", &id()).unwrap();
+    let outer = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == "sym:qwtm/example@src/app.ts#setup")
+        .expect("outer symbol keeps its id");
+    assert!(outer.props.get("via").is_none(), "outer fact untouched");
+    let calls = edge_pairs(&ex, "CALLS");
+    let entry = calls
+        .iter()
+        .find(|(s, d)| {
+            *s == "sym:qwtm/example@src/app.ts#boot"
+                && d.starts_with("sym:qwtm/example@src/app.ts#eval@")
+        })
+        .expect("containment CALLS into the eval entry symbol")
+        .1;
+    let inner_id = format!("{entry}.setup");
+    let inner = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == inner_id)
+        .expect("eval-defined symbol is namespaced under its site");
+    assert_eq!(inner.props["via"], "eval");
+    // Each call targets its own declaration: boot's direct call the outer
+    // symbol, the eval body's call the eval-scoped one.
+    assert!(calls.contains(&(
+        "sym:qwtm/example@src/app.ts#boot",
+        "sym:qwtm/example@src/app.ts#setup"
+    )));
+    assert!(calls.contains(&(entry, inner_id.as_str())));
+}
+
+// A same-file `const CODE = '…'` and a const-object member proven through
+// `const_resolution` are as compile-time-known as an inline literal. (T-0099)
+#[test]
+fn const_resolved_eval_extracts_through_binding_proof() {
+    let src = r#"
+const BOOT = "function legacyBoot() {}";
+const Scripts = { report: "function legacyReport() {}" } as const;
+export function run() {
+  eval(BOOT);
+  eval(Scripts.report);
+}
+"#;
+    let ex = extract_source(src.as_bytes(), "src/legacy.ts", &id()).unwrap();
+    for name in ["legacyBoot", "legacyReport"] {
+        let node = ex
+            .nodes
+            .iter()
+            .find(|n| {
+                n.id.starts_with("sym:qwtm/example@src/legacy.ts#eval@")
+                    && n.id.ends_with(&format!(".{name}"))
+            })
+            .unwrap_or_else(|| panic!("{name} extracted under its eval namespace"));
+        assert_eq!(node.props["name"], *name);
+        assert_eq!(node.props["via"], "eval");
+        assert_eq!(node.props["prov"]["confidence_tier"], "Confirmed");
+    }
+    // Both sites prove to literals; `run` calls both entry symbols.
+    let claims: Vec<(u64, EvalProof)> = ex.eval_sites.iter().map(|s| (s.line, s.proof)).collect();
+    assert_eq!(
+        claims,
+        vec![(5, EvalProof::Covered), (6, EvalProof::Covered)]
+    );
+    let entries = edge_pairs(&ex, "CALLS")
+        .into_iter()
+        .filter(|(s, d)| {
+            *s == "sym:qwtm/example@src/legacy.ts#run"
+                && d.starts_with("sym:qwtm/example@src/legacy.ts#eval@")
+        })
+        .count();
+    assert_eq!(entries, 2);
+}
+
+// Unprovable arguments emit no facts, ever — a const-shaped binding that
+// cannot be proven stays an explicit Gap claim, and interpolated templates
+// or computed expressions stay dynamic (Unsupported). (T-0099)
+#[test]
+fn unproven_and_interpolated_eval_yield_classification_but_no_facts() {
+    let src = r#"
+const code = build();
+export function run(name: string) {
+  eval(code);
+  eval(`register('${name}')`);
+  eval(name + '()');
+}
+"#;
+    let ex = extract_source(src.as_bytes(), "src/dynamic.ts", &id()).unwrap();
+    assert!(ex.nodes.iter().all(|n| n.props.get("via").is_none()));
+    assert!(ex.edges.iter().all(|e| e.props.get("via").is_none()));
+    let claims: Vec<(u64, EvalProof)> = ex.eval_sites.iter().map(|s| (s.line, s.proof)).collect();
+    assert_eq!(
+        claims,
+        vec![
+            (4, EvalProof::ConstUnproven),
+            (5, EvalProof::Dynamic),
+            (6, EvalProof::Dynamic),
+        ]
+    );
+}
+
+// A local binding named `eval` is NOT the global — no facts and no claim,
+// following the `shadowed_fetch_is_not_a_fetch_site` precedent. (T-0099)
+#[test]
+fn shadowed_eval_is_not_the_global_and_yields_no_facts() {
+    let local_shadow = extract_source(
+        br#"
+function eval(code) { return code; }
+export function run() { eval("function fake() {}"); }
+"#,
+        "src/sandbox.js",
+        &id(),
+    )
+    .unwrap();
+    assert!(
+        local_shadow
+            .nodes
+            .iter()
+            .all(|n| n.id != "sym:qwtm/example@src/sandbox.js#fake")
+    );
+    assert!(local_shadow.eval_sites.is_empty());
+
+    let imported_shadow = extract_source(
+        br#"
+import { eval } from './interpreter';
+export function run() { eval("function fake() {}"); }
+"#,
+        "src/host.ts",
+        &id(),
+    )
+    .unwrap();
+    assert!(
+        imported_shadow
+            .nodes
+            .iter()
+            .all(|n| n.id != "sym:qwtm/example@src/host.ts#fake")
+    );
+    assert!(imported_shadow.eval_sites.is_empty());
+
+    // #217 review: a NON-function local binding shadows too — a const bound
+    // to anything, or a parameter — as does a `Function` binding for the
+    // constructor form. None of these are the global evaluator.
+    for (name, path, source) in [
+        (
+            "const-bound variable",
+            "src/vm.js",
+            "const eval = interpret;\nexport function run() { eval(\"function fake() {}\"); }\n",
+        ),
+        (
+            "parameter",
+            "src/exec.js",
+            "export function run(eval) { eval(\"function fake() {}\"); }\n",
+        ),
+        (
+            "Function constructor binding",
+            "src/ctor.js",
+            "const Function = makeCtor();\nexport function run() { return new Function(\"return 1;\"); }\n",
+        ),
+    ] {
+        let shadowed = extract_source(source.as_bytes(), path, &id()).unwrap();
+        assert!(
+            shadowed.nodes.iter().all(|n| n.props.get("via").is_none()),
+            "{name} shadow must not extract: {path}"
+        );
+        assert!(
+            shadowed.eval_sites.is_empty(),
+            "{name} shadow must not claim: {path}"
+        );
+    }
+}
+
+// new Function("a", "b", "body"): the LAST string argument is the body,
+// earlier ones are parameter names; a computed body emits nothing. (T-0099)
+#[test]
+fn new_function_extracts_the_last_string_argument_as_body() {
+    let src = r#"
+export function make() {
+  return new Function("a", "b", "function helper(x) { return x; } return helper(a) + helper(b);");
+}
+"#;
+    let ex = extract_source(src.as_bytes(), "src/factory.ts", &id()).unwrap();
+    let calls = edge_pairs(&ex, "CALLS");
+    let entry = calls
+        .iter()
+        .find(|(s, d)| {
+            *s == "sym:qwtm/example@src/factory.ts#make"
+                && d.starts_with("sym:qwtm/example@src/factory.ts#eval@")
+        })
+        .expect("containment CALLS into the body entry symbol")
+        .1;
+    let helper_id = format!("{entry}.helper");
+    let helper = ex
+        .nodes
+        .iter()
+        .find(|n| n.id == helper_id)
+        .expect("body-defined symbol");
+    assert_eq!(helper.props["via"], "eval");
+    // Evidence cites the BODY string (the last argument), not a parameter.
+    let ev = &helper.props["prov"]["evidence"][0];
+    let span = &src
+        [ev["byte_start"].as_u64().unwrap() as usize..ev["byte_end"].as_u64().unwrap() as usize];
+    assert!(span.starts_with("\"function helper"), "body span: {span}");
+    assert!(calls.contains(&(entry, helper_id.as_str())));
+    assert_eq!(
+        ex.eval_sites,
+        vec![EvalSite {
+            path: "src/factory.ts".into(),
+            line: 3,
+            proof: EvalProof::Covered,
+        }]
+    );
+
+    // Runtime-computed body: no facts, stays dynamic.
+    let dynamic = extract_source(
+        br#"
+export function make() {
+  return new Function(buildBody());
+}
+"#,
+        "src/dyn.ts",
+        &id(),
+    )
+    .unwrap();
+    assert!(dynamic.nodes.iter().all(|n| n.props.get("via").is_none()));
+    assert_eq!(
+        dynamic.eval_sites,
+        vec![EvalSite {
+            path: "src/dyn.ts".into(),
+            line: 3,
+            proof: EvalProof::Dynamic,
+        }]
+    );
+}
+
+#[test]
+fn directory_index_import_resolves_through_index_files() {
+    // #213 (AC-0100): `./utils` meaning `./utils/index.ts` is the Node
+    // directory-index convention; the extensionless guess must try the
+    // index file before giving up, for IMPORTS and cross-file CALLS alike.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "import { helper } from './utils';\nexport function run() { helper(); }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("utils")).unwrap();
+    std::fs::write(
+        dir.path().join("utils/index.ts"),
+        "export function helper() {}\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let index_file = "file:qwtm/example@utils/index.ts";
+    assert!(edge_pairs(&out, "IMPORTS").contains(&("file:qwtm/example@app.ts", index_file)));
+    assert!(
+        !out.nodes
+            .iter()
+            .any(|n| n.id == "file:qwtm/example@utils.ts")
+    );
+    assert!(edge_pairs(&out, "CALLS").contains(&(
+        "sym:qwtm/example@app.ts#run",
+        "sym:qwtm/example@utils/index.ts#helper"
+    )));
+}
+
+#[test]
+fn nodenext_js_extension_import_resolves_to_the_ts_source() {
+    // #213 (AC-0100): `moduleResolution: nodenext` requires imports to
+    // spell the *emitted* `.js` extension — `import './foo.js'` written in
+    // a tree that holds `foo.ts`. The spelled file doesn't exist; its TS
+    // sibling does, and both the IMPORTS and CALLS edges must join it. A
+    // real `.js` file spelled `.js` is left exactly as spelled.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "import { fetchUsers } from './api.js';\nimport { legacy } from './old.js';\nexport function run() { fetchUsers(); legacy(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("api.ts"),
+        "export function fetchUsers() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("old.js"), "export function legacy() {}\n").unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports = edge_pairs(&out, "IMPORTS");
+    assert!(imports.contains(&("file:qwtm/example@app.ts", "file:qwtm/example@api.ts")));
+    assert!(imports.contains(&("file:qwtm/example@app.ts", "file:qwtm/example@old.js")));
+    // No phantom api.js placeholder survives.
+    assert!(!out.nodes.iter().any(|n| n.id == "file:qwtm/example@api.js"));
+    let calls = edge_pairs(&out, "CALLS");
+    assert!(calls.contains(&(
+        "sym:qwtm/example@app.ts#run",
+        "sym:qwtm/example@api.ts#fetchUsers"
+    )));
+    assert!(calls.contains(&(
+        "sym:qwtm/example@app.ts#run",
+        "sym:qwtm/example@old.js#legacy"
+    )));
+}
+
+#[test]
+fn tsconfig_paths_alias_resolves_to_a_real_file_with_the_config_cited() {
+    // #213 (AC-0100): a `paths` alias is applied before the specifier is
+    // classified as an opaque package, and the tsconfig that decided the
+    // resolution is cited in the edge's provenance evidence. Unmatched
+    // bare specifiers stay `mod:` nodes exactly as before.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{
+  // JSONC on purpose — real tsconfigs carry comments.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] },
+  },
+}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src/components")).unwrap();
+    std::fs::write(
+        dir.path().join("src/components/Button.tsx"),
+        "export function Button() { return null; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/app.tsx"),
+        "import { Button } from '@/components/Button';\nimport react from 'react';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports: Vec<_> = out.edges.iter().filter(|e| e.label == "IMPORTS").collect();
+    let resolved = imports
+        .iter()
+        .find(|e| e.dst == "file:qwtm/example@src/components/Button.tsx")
+        .expect("alias resolves to the real file");
+    assert_eq!(resolved.props["resolved_via"], "tsconfig-paths");
+    let prov: Provenance = serde_json::from_value(resolved.props["prov"].clone()).unwrap();
+    assert!(
+        prov.evidence
+            .iter()
+            .any(|evidence| evidence.path == "tsconfig.json"),
+        "the deciding config is citable evidence"
+    );
+    // External packages stay opaque — resolution never reaches node_modules.
+    assert!(imports.iter().any(|e| e.dst == "mod:react"));
+    assert!(!imports.iter().any(|e| e.dst == "mod:@/components/Button"));
+}
+
+#[test]
+fn baseurl_bare_specifier_resolves_without_paths() {
+    // #213: an explicit baseUrl alone lets bare specifiers name files
+    // relative to it (classic pre-NodeNext TS).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "src" } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src/lib")).unwrap();
+    std::fs::write(dir.path().join("src/lib/db.ts"), "export function q() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/main.ts"),
+        "import { q } from 'lib/db';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports = edge_pairs(&out, "IMPORTS");
+    assert!(imports.contains(&(
+        "file:qwtm/example@src/main.ts",
+        "file:qwtm/example@src/lib/db.ts"
+    )));
+}
+
+#[test]
+fn workspace_package_bare_specifier_resolves_through_its_exports_map() {
+    // #213 (AC-0100): a bare specifier naming a sibling workspace package
+    // resolves through that package's exports map to its real source, with
+    // the package.json cited; anything not in the tree stays `mod:`.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/shared/src")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/shared/package.json"),
+        r#"{ "name": "@acme/shared", "exports": { ".": { "import": "./src/index.ts" } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("packages/shared/src/index.ts"),
+        "export function api() {}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/main.ts"),
+        "import { api } from '@acme/shared';\nimport lodash from 'lodash';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports: Vec<_> = out.edges.iter().filter(|e| e.label == "IMPORTS").collect();
+    let resolved = imports
+        .iter()
+        .find(|e| e.dst == "file:qwtm/example@packages/shared/src/index.ts")
+        .expect("workspace package resolves to its entry source");
+    assert_eq!(resolved.props["resolved_via"], "workspace-package");
+    let prov: Provenance = serde_json::from_value(resolved.props["prov"].clone()).unwrap();
+    assert!(
+        prov.evidence
+            .iter()
+            .any(|evidence| evidence.path == "packages/shared/package.json")
+    );
+    assert!(imports.iter().any(|e| e.dst == "mod:lodash"));
+
+    // Deterministic: a second walk produces identical edges (US-0014).
+    let again = extract_dir(dir.path(), &id()).unwrap();
+    assert_eq!(out.edges, again.edges);
+}
+
+#[test]
+fn unproven_alias_and_missing_index_fail_closed() {
+    // #213: resolution is a proof against real files — an alias mapping to
+    // nothing and an import with no file and no index stay explicit
+    // (`mod:` node / placeholder), never a guessed rewrite.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "import { x } from '@/nothing';\nimport { y } from './missing';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports: Vec<_> = out.edges.iter().filter(|e| e.label == "IMPORTS").collect();
+    assert!(imports.iter().any(|e| e.dst == "mod:@/nothing"));
+    // The relative miss keeps the guessed placeholder id (made an explicit
+    // placeholder node by close_over_endpoints) — no invented resolution.
+    assert!(
+        imports
+            .iter()
+            .any(|e| e.dst == "file:qwtm/example@missing.ts")
+    );
+    let placeholder = out
+        .nodes
+        .iter()
+        .find(|n| n.id == "file:qwtm/example@missing.ts")
+        .expect("placeholder node exists");
+    assert_eq!(placeholder.props["placeholder"], true);
+}
+
+#[test]
+fn nested_tsconfig_shadows_parent_aliases_even_when_empty() {
+    // #220 review: the nearest tsconfig governs its files outright — a
+    // nested package with its own (alias-free) tsconfig must NOT have the
+    // root config's aliases reach into it; the import stays an explicit
+    // `mod:` node. Files governed by the root config keep resolving.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/thing.ts"), "export function t() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("root.ts"),
+        "import { t } from '@/thing';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(dir.path().join("packages/app/tsconfig.json"), "{}").unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/main.ts"),
+        "import { t } from '@/thing';\nexport const b = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports = edge_pairs(&out, "IMPORTS");
+    // Root-governed file resolves through the root alias…
+    assert!(imports.contains(&(
+        "file:qwtm/example@root.ts",
+        "file:qwtm/example@src/thing.ts"
+    )));
+    // …but the nested package's identical import is shadowed by its own
+    // config and stays unresolved rather than borrowing the root alias.
+    assert!(imports.contains(&("file:qwtm/example@packages/app/main.ts", "mod:@/thing")));
+}
+
+#[test]
+fn most_specific_paths_pattern_wins() {
+    // #220 review: TypeScript picks the pattern with the longest prefix
+    // before `*` — `@/foo/*` must beat `@/*` even when both targets exist.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"], "@/foo/*": ["special/*"] } } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src/foo")).unwrap();
+    std::fs::write(
+        dir.path().join("src/foo/bar.ts"),
+        "export const general = 1;\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("special")).unwrap();
+    std::fs::write(
+        dir.path().join("special/bar.ts"),
+        "export const specific = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "import { specific } from '@/foo/bar';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let out = extract_dir(dir.path(), &id()).unwrap();
+    let imports = edge_pairs(&out, "IMPORTS");
+    assert!(imports.contains(&(
+        "file:qwtm/example@app.ts",
+        "file:qwtm/example@special/bar.ts"
+    )));
+    assert!(!imports.contains(&(
+        "file:qwtm/example@app.ts",
+        "file:qwtm/example@src/foo/bar.ts"
+    )));
+}
